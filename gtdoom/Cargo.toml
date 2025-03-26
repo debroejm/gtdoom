@@ -1,0 +1,6 @@
+[package]
+name = "gtdoom"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
