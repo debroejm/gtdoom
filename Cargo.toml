@@ -6,3 +6,28 @@ members = ["gtdoom"]
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
+
+[workspace.dependencies]
+ahash = "0.8"
+async-trait = "0.1"
+async_zip = { version = "0.0.17", features = ["deflate", "bzip2", "lzma"] }
+base64 = "0.22"
+chrono = "0.4"
+educe = "0.6"
+#gtether = { version = "0.1", features = ["gui"] }
+gtether = { path = "../gtether/gtether", features = ["gui"] }
+image = "0.25"
+nalgebra-glm = "0.19"
+notify = "8.0"
+notify-debouncer-full = "0.5"
+parking_lot = "0.12"
+quick_cache = "0.6"
+sanitize-filename = "0.6"
+sha2 = "0.10"
+smol = "2.0"
+strum = { version = "0.27", features = ["derive"]}
+thiserror = "2.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+vulkano = "0.34"
+vulkano-shaders = "0.34"
