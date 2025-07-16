@@ -1,9 +1,7 @@
 use ahash::{HashMap, HashMapExt};
 use async_trait::async_trait;
 use gtether::render::{EngineDevice, Renderer};
-use gtether::resource::manager::{LoadPriority, ResourceManager};
-use gtether::resource::path::ResourcePath;
-use gtether::resource::{ResourceLoadError, ResourceLoader, ResourceReadData};
+use gtether::resource::{ResourceLoadContext, ResourceLoadError, ResourceLoader, ResourceReadData};
 use image::{DynamicImage, ImageReader, Rgba, RgbaImage};
 use smol::io::AsyncReadExt;
 use std::io;
@@ -62,9 +60,8 @@ pub struct PaletteLoader(());
 impl ResourceLoader<Palettes> for PaletteLoader {
     async fn load(
         &self,
-        _manager: &Arc<ResourceManager>,
-        _id: ResourcePath,
         mut data: ResourceReadData,
+        _ctx: ResourceLoadContext,
     ) -> Result<Box<Palettes>, ResourceLoadError> {
         let mut palette_buffer = [0; 256 * 3];
         let mut palettes = Vec::new();
@@ -246,10 +243,8 @@ impl PatchViewLoader {
 impl ResourceLoader<PatchView> for PatchViewLoader {
     async fn load(
         &self,
-        // TODO: Move manager + things like load priority into a ctx - only access ref without Arc
-        manager: &Arc<ResourceManager>,
-        _id: ResourcePath,
         mut data: ResourceReadData,
+        ctx: ResourceLoadContext,
     ) -> Result<Box<PatchView>, ResourceLoadError> {
         let mut raw = Vec::new();
         data.read_to_end(&mut raw).await
@@ -265,10 +260,10 @@ impl ResourceLoader<PatchView> for PatchViewLoader {
                 .map_err(ResourceLoadError::from_error)?
                 .into_rgba8()
         } else {
-            let palettes_fut = manager.get_or_load(
+            let palettes_fut = ctx.manager().get_or_load(
                 "PLAYPAL",
                 Palettes::LOADER,
-                LoadPriority::Immediate,
+                ctx.priority(),
             );
 
             let patch = PalettedPatch::load(&raw)
