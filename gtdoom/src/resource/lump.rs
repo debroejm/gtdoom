@@ -5,24 +5,27 @@ use async_zip::error::ZipError;
 use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
 use educe::Educe;
-use gtether::resource::path::ResourcePath;
+use gtether::resource::id::ResourceId;
 use gtether::resource::source::{ResourceData, ResourceDataResult, ResourceDataSource, ResourceSource, ResourceUpdate, ResourceWatcher, SourceIndex};
-use gtether::resource::ResourceLoadError;
+use gtether::resource::{ResourceLoadContext, ResourceLoadError, ResourceLoader, ResourceReadData};
 use notify::event::{ModifyKind, RenameMode};
 use notify_debouncer_full::{new_debouncer, DebounceEventResult, Debouncer};
 use parking_lot::RwLock;
+use regex::RegexBuilder;
 use sha2::{Digest, Sha256};
 use smol::future;
 use smol::io::{AsyncRead, AsyncReadExt, AsyncSeekExt, BufReader};
 use std::error::Error;
 use std::ffi::OsStr;
 use std::fmt::{Debug, Display, Formatter};
-use std::io::SeekFrom;
+use std::io::{Error as IoError, ErrorKind as IoErrorKind, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use strum::VariantArray;
 use tracing::{debug, error, info, trace, warn};
+
+use crate::resource::string_from_bytes_until_nul_checked;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WadType {
@@ -68,6 +71,7 @@ pub enum LumpType {
     Sound,
     Music,
     Voxel,
+    Map,
     Unknown,
 }
 
@@ -89,6 +93,7 @@ impl Display for LumpType {
             Self::Sound => write!(f, "<sound>"),
             Self::Music => write!(f, "<music>"),
             Self::Voxel => write!(f, "VX:<voxel>"),
+            Self::Map => write!(f, "<map>"),
             Self::Unknown => write!(f, "<unknown>"),
         }
     }
@@ -221,7 +226,7 @@ pub enum LumpFileError {
     #[error("unknown file type: {0}")]
     UnknownFileType(String),
     #[error("lump not found: {0}")]
-    NotFound(ResourcePath),
+    NotFound(ResourceId),
     #[error("start marker ({start}) does not match end marker ({end})")]
     MismatchedMarker {
         start: LumpType,
@@ -248,6 +253,13 @@ impl From<ZipError> for LumpFileError {
     }
 }
 
+impl From<regex::Error> for LumpFileError {
+    #[inline]
+    fn from(value: regex::Error) -> Self {
+        Self::Other(Box::new(value))
+    }
+}
+
 impl From<LumpFileError> for ResourceLoadError {
     #[inline]
     fn from(value: LumpFileError) -> Self {
@@ -258,17 +270,65 @@ impl From<LumpFileError> for ResourceLoadError {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct LumpDirectoryEntry {
+    offset: i32,
+    size: i32,
+    name: String,
+}
+
+impl LumpDirectoryEntry {
+    pub const BYTE_COUNT: usize = size_of::<i32>() + size_of::<i32>() + 8;
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, IoError> {
+        if bytes.len() < Self::BYTE_COUNT {
+            return Err(IoErrorKind::UnexpectedEof.into())
+        }
+
+        let offset = i32::from_le_bytes(bytes[0..4].try_into().unwrap());
+        let size = i32::from_le_bytes(bytes[4..8].try_into().unwrap());
+        let name = string_from_bytes_until_nul_checked(&bytes[8..16]);
+
+        Ok(Self {
+            offset,
+            size,
+            name,
+        })
+    }
+
+    pub async fn read(mut reader: impl AsyncRead + Unpin) -> Result<Self, IoError> {
+        let mut bytes = [0; Self::BYTE_COUNT];
+        reader.read_exact(&mut bytes).await?;
+        Self::from_bytes(&bytes)
+    }
+
+    #[inline]
+    pub fn offset(&self) -> u32 {
+        self.offset as u32
+    }
+
+    #[inline]
+    pub fn size(&self) -> usize {
+        self.size as usize
+    }
+
+    #[inline]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
+
 #[derive(Debug)]
 struct WadEntry {
     l_type: LumpType,
     size: usize,
-    offset: u64,
+    offset: u32,
     hash: String,
 }
 
 impl WadEntry {
     async fn read_lump(&self, mut file: smol::fs::File) -> Result<Lump, LumpFileError> {
-        file.seek(SeekFrom::Start(self.offset)).await?;
+        file.seek(SeekFrom::Start(self.offset as u64)).await?;
         Ok(Lump::new(self.l_type, file.take(self.size as u64), self.hash.clone()))
     }
 }
@@ -277,10 +337,28 @@ impl WadEntry {
 struct Wad {
     #[allow(unused)]
     w_type: WadType,
-    data: HashMap<ResourcePath, WadEntry>,
+    data: HashMap<ResourceId, WadEntry>,
 }
 
 impl Wad {
+    const MAP_LUMP_NAMES: [&'static str; 15] = [
+        "TEXTMAP",
+        "THINGS",
+        "LINEDEFS",
+        "SIDEDEFS",
+        "VERTEXES",
+        "SEGS",
+        "SSECTORS",
+        "NODES",
+        "ZNODES",
+        "SECTORS",
+        "REJECT",
+        "BLOCKMAP",
+        "BEHAVIOR",
+        "SCRIPTS",
+        "ENDMAP",
+    ];
+
     async fn read(file: &mut smol::fs::File) -> Result<Self, LumpFileError> {
         file.seek(SeekFrom::Start(0)).await?;
         let (w_type, dir_size, dir_offset) = {
@@ -296,66 +374,119 @@ impl Wad {
             (w_type, size, offset)
         };
 
+        enum LumpBuilder {
+            Type(LumpType),
+            Map(String),
+        }
+        let map_re = RegexBuilder::new(r"^E\dM\d|MAP\d\d$")
+            .case_insensitive(true)
+            .build()?;
+
         file.seek(SeekFrom::Start(dir_offset)).await?;
-        let mut lump_type_stack = vec![LumpType::Global];
+        let mut lump_builder_stack = vec![LumpBuilder::Type(LumpType::Global)];
         let mut data = HashMap::with_capacity(dir_size);
+
+        fn try_map_pop(stack: &mut Vec<LumpBuilder>) {
+            if let Some(top) = stack.pop() {
+                match top {
+                    LumpBuilder::Map(_) => {},
+                    _ => stack.push(top),
+                }
+            }
+        }
+
         for _ in 0..dir_size {
-            let curr_lump_type = *lump_type_stack.last().unwrap();
+            let entry = LumpDirectoryEntry::read(&mut *file).await?;
+            trace!(?entry, "Processing lump");
 
-            let mut buffer = [0; 16];
-            file.read_exact(&mut buffer).await?;
-
-            let offset = i32::from_le_bytes(buffer[0..4].try_into().unwrap()) as u64;
-            let size = i32::from_le_bytes(buffer[4..8].try_into().unwrap()) as usize;
-            let name = String::from_utf8_lossy(&buffer[8..16])
-                .trim_matches(char::from(0))
-                .to_owned();
-
-            debug!(?name, "Processing lump");
+            let offset = entry.offset();
+            let size = entry.size();
+            let name = entry.name().to_string();
 
             if name.ends_with("_START") {
+                try_map_pop(&mut lump_builder_stack);
+
                 let marker = &name[0..(name.len() - 6)];
                 let lump_type = LumpType::from(marker);
                 if lump_type == LumpType::Unknown {
                     warn!(marker, "Unknown START lump type");
                 }
 
-                data.insert(ResourcePath::from(&name), WadEntry {
+                data.insert(ResourceId::from(&name), WadEntry {
                     l_type: LumpType::Marker,
                     size,
                     offset,
                     hash: name,
                 });
-                lump_type_stack.push(lump_type);
+                lump_builder_stack.push(LumpBuilder::Type(lump_type));
             } else if name.ends_with("_END") {
+                try_map_pop(&mut lump_builder_stack);
+                let curr_lump_builder = lump_builder_stack.last().unwrap();
+
                 let marker = &name[0..(name.len() - 4)];
                 let lump_type = LumpType::from(marker);
                 if lump_type == LumpType::Unknown {
                     warn!(marker, "Unknown END lump type");
                 }
-                if lump_type != curr_lump_type {
-                    return Err(LumpFileError::MismatchedMarker { start: curr_lump_type, end: lump_type })
+                match curr_lump_builder {
+                    LumpBuilder::Type(curr_lump_type) => {
+                        if lump_type != *curr_lump_type {
+                            return Err(LumpFileError::MismatchedMarker { start: *curr_lump_type, end: lump_type })
+                        }
+                    },
+                    LumpBuilder::Map { .. } => {
+                        return Err(LumpFileError::MismatchedMarker { start: LumpType::Map, end: lump_type })
+                    }
                 }
 
-                data.insert(ResourcePath::from(&name), WadEntry {
+                data.insert(ResourceId::from(&name), WadEntry {
                     l_type: LumpType::Marker,
                     size,
                     offset,
                     hash: name,
                 });
-                lump_type_stack.pop();
-            } else {
-                data.insert(ResourcePath::from(&name), WadEntry {
-                    l_type: curr_lump_type,
+                lump_builder_stack.pop();
+            } else if map_re.is_match(&name) { // TODO: Also check map names from MAPINFO
+                try_map_pop(&mut lump_builder_stack);
+                data.insert(ResourceId::from(&name), WadEntry {
+                    l_type: LumpType::Map,
                     size,
                     offset,
-                    hash: String::new(),
+                    hash: name.clone(),
                 });
+                lump_builder_stack.push(LumpBuilder::Map(name));
+            } else {
+                if !Self::MAP_LUMP_NAMES.contains(&name.as_str()) {
+                    try_map_pop(&mut lump_builder_stack);
+                }
+                match lump_builder_stack.last().unwrap() {
+                    LumpBuilder::Type(l_type) => {
+                        data.insert(ResourceId::from(&name), WadEntry {
+                            l_type: *l_type,
+                            size,
+                            offset,
+                            hash: String::new(),
+                        });
+                    },
+                    LumpBuilder::Map(map_name) => {
+                        data.insert(ResourceId::from(map_name).join(name), WadEntry {
+                            l_type: LumpType::Map,
+                            size,
+                            offset,
+                            hash: String::new(),
+                        });
+                    }
+                }
             }
         }
+        try_map_pop(&mut lump_builder_stack);
 
         for entry in data.values_mut() {
-            file.seek(SeekFrom::Start(entry.offset)).await?;
+            if entry.hash != "" {
+                // Lump already has a hash
+                continue
+            }
+            file.seek(SeekFrom::Start(entry.offset as u64)).await?;
             let mut sha256 = Sha256::new();
             smol::io::copy(
                 file.take(entry.size as u64),
@@ -398,7 +529,7 @@ impl ZipEntry {
 
 #[derive(Debug)]
 struct Zip {
-    data: HashMap<ResourcePath, ZipEntry>,
+    data: HashMap<ResourceId, ZipEntry>,
 }
 
 impl Zip {
@@ -427,7 +558,7 @@ impl Zip {
             }
 
             let id = match path.file_name().and_then(OsStr::to_str) {
-                Some(name) => ResourcePath::from(name),
+                Some(name) => ResourceId::from(name),
                 None => continue,
             };
 
@@ -477,7 +608,7 @@ impl LumpFile {
         }
     }
 
-    async fn load_lump(&self, path: &Path, id: &ResourcePath) -> Result<Lump, LumpFileError> {
+    async fn load_lump(&self, path: &Path, id: &ResourceId) -> Result<Lump, LumpFileError> {
         match self {
             Self::None => Err(LumpFileError::NotFound(id.clone())),
             Self::Wad(wad) => {
@@ -503,7 +634,7 @@ impl LumpFile {
         }
     }
 
-    fn hash(&self, id: &ResourcePath) -> Option<&String> {
+    fn hash(&self, id: &ResourceId) -> Option<&String> {
         match self {
             Self::None => None,
             Self::Wad(wad) => wad.data.get(id).map(|e| &e.hash),
@@ -511,7 +642,7 @@ impl LumpFile {
         }
     }
 
-    fn diff_hashes(&self, other: &LumpFile) -> HashMap<ResourcePath, ResourceUpdate> {
+    fn diff_hashes(&self, other: &LumpFile) -> HashMap<ResourceId, ResourceUpdate> {
         let mut diff = HashMap::new();
 
         for (id, hash) in self.hashes() {
@@ -536,12 +667,12 @@ impl LumpFile {
 
 enum LumpFileHashIter<'a> {
     None,
-    Wad(std::collections::hash_map::Iter<'a, ResourcePath, WadEntry>),
-    Zip(std::collections::hash_map::Iter<'a, ResourcePath, ZipEntry>),
+    Wad(std::collections::hash_map::Iter<'a, ResourceId, WadEntry>),
+    Zip(std::collections::hash_map::Iter<'a, ResourceId, ZipEntry>),
 }
 
 impl<'a> Iterator for LumpFileHashIter<'a> {
-    type Item = (&'a ResourcePath, &'a String);
+    type Item = (&'a ResourceId, &'a String);
 
     fn next(&mut self) -> Option<Self::Item> {
         match self {
@@ -567,7 +698,7 @@ impl<'a> ExactSizeIterator for LumpFileHashIter<'a> {}
 #[derive(Debug)]
 struct State {
     lump_file: RwLock<LumpFile>,
-    watchers: RwLock<HashMap<ResourcePath, Box<dyn ResourceWatcher>>>,
+    watchers: RwLock<HashMap<ResourceId, Box<dyn ResourceWatcher>>>,
 }
 
 impl State {
@@ -667,24 +798,46 @@ impl LumpFileSource {
 
 #[async_trait]
 impl ResourceSource for LumpFileSource {
-    fn hash(&self, id: &ResourcePath) -> Option<ResourceDataSource> {
+    fn hash(&self, id: &ResourceId) -> Option<ResourceDataSource> {
         let lump_file = self.state.lump_file.read();
         lump_file.hash(id).map(|s| ResourceDataSource::new(s.clone()))
     }
 
-    async fn load(&self, id: &ResourcePath) -> ResourceDataResult {
-        info!(path = ?self.file_path, ?id, "Loading lump");
+    async fn load(&self, id: &ResourceId) -> ResourceDataResult {
         let lump_file = self.state.lump_file.read();
-        lump_file.load_lump(&self.file_path, id).await
-            .map(Into::into)
-            .map_err(Into::into)
+        let lump = lump_file.load_lump(&self.file_path, id).await?;
+        debug!(path = ?self.file_path, %id, "Loading lump");
+        Ok(lump.into())
     }
 
-    fn watch(&self, id: ResourcePath, watcher: Box<dyn ResourceWatcher>, _sub_idx: Option<SourceIndex>) {
+    fn watch(&self, id: ResourceId, watcher: Box<dyn ResourceWatcher>, _sub_idx: Option<SourceIndex>) {
         self.state.watchers.write().insert(id, watcher);
     }
 
-    fn unwatch(&self, id: &ResourcePath) {
+    fn unwatch(&self, id: &ResourceId) {
         self.state.watchers.write().remove(id);
+    }
+}
+
+pub struct MarkerLump {}
+
+impl MarkerLump {
+    #[inline]
+    pub fn loader() -> MarkerLumpLoader {
+        MarkerLumpLoader {}
+    }
+}
+
+pub struct MarkerLumpLoader {}
+
+#[async_trait]
+impl ResourceLoader<MarkerLump> for MarkerLumpLoader {
+    async fn load(
+        &self,
+        _data: ResourceReadData,
+        _ctx: ResourceLoadContext,
+    ) -> Result<Box<MarkerLump>, ResourceLoadError> {
+        // Marker lumps don't actually have data
+        Ok(Box::new(MarkerLump {}))
     }
 }

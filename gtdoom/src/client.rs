@@ -8,8 +8,10 @@ use gtether::render::render_pass::EngineRenderPassBuilder;
 use gtether::resource::manager::LoadPriority;
 use gtether::Engine;
 use std::sync::Arc;
+use tracing::info;
 
 use crate::render_test::FlatRenderer;
+use crate::resource::map::Map;
 use crate::resource::patch::PatchViewLoader;
 
 pub struct GtdoomClient {
@@ -63,5 +65,13 @@ impl Application for GtdoomClient {
             .end_subpass()
             .build().unwrap();
         window.renderer().set_render_pass(render_pass);
+
+        let map_name = "E1M1";
+        let map = engine.resources().get_or_load(
+            map_name,
+            Map::loader(),
+            LoadPriority::Immediate,
+        ).await.unwrap();
+        info!(?map_name, ?map, "Loaded map");
     }
 }
