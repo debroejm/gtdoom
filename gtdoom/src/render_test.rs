@@ -1,25 +1,23 @@
-use std::sync::Arc;
+use gtether::render::descriptor_set::EngineDescriptorSet;
+use gtether::render::image::{ImageSampler, VKImageViewSource};
+use gtether::render::pipeline::{EngineGraphicsPipeline, VKGraphicsPipelineSource, ViewportType};
 use gtether::render::render_pass::EngineRenderHandler;
 use gtether::render::{FlatVertex, Renderer, VulkanoError};
-use gtether::render::descriptor_set::EngineDescriptorSet;
-use gtether::render::image::ImageSampler;
-use gtether::render::pipeline::{EngineGraphicsPipeline, VKGraphicsPipelineSource, ViewportType};
 use gtether::resource::Resource;
+use std::sync::Arc;
 use vulkano::buffer::Subbuffer;
 use vulkano::command_buffer::{AutoCommandBufferBuilder, PrimaryAutoCommandBuffer};
 use vulkano::image::sampler::{Filter, Sampler, SamplerCreateInfo};
-use vulkano::render_pass::Subpass;
-use vulkano::pipeline::graphics::vertex_input::{Vertex, VertexDefinition};
-use vulkano::pipeline::{Pipeline, PipelineBindPoint, PipelineLayout, PipelineShaderStageCreateInfo};
 use vulkano::pipeline::graphics::color_blend::{ColorBlendAttachmentState, ColorBlendState};
-use vulkano::pipeline::graphics::GraphicsPipelineCreateInfo;
 use vulkano::pipeline::graphics::input_assembly::InputAssemblyState;
 use vulkano::pipeline::graphics::multisample::MultisampleState;
 use vulkano::pipeline::graphics::rasterization::{CullMode, RasterizationState};
+use vulkano::pipeline::graphics::vertex_input::{Vertex, VertexDefinition};
+use vulkano::pipeline::graphics::GraphicsPipelineCreateInfo;
 use vulkano::pipeline::layout::PipelineDescriptorSetLayoutCreateInfo;
+use vulkano::pipeline::{Pipeline, PipelineBindPoint, PipelineLayout, PipelineShaderStageCreateInfo};
+use vulkano::render_pass::Subpass;
 use vulkano::Validated;
-
-use crate::resource::patch::PatchView;
 
 mod vert {
     vulkano_shaders::shader! {
@@ -58,7 +56,7 @@ mod frag {
 
 pub struct FlatRenderer {
     #[allow(unused)]
-    patch: Arc<Resource<PatchView>>,
+    patch: Arc<Resource<dyn VKImageViewSource>>,
     graphics: Arc<EngineGraphicsPipeline>,
     buffer: Subbuffer<[FlatVertex]>,
     descriptor_set: EngineDescriptorSet,
@@ -68,7 +66,7 @@ impl FlatRenderer {
     pub fn new(
         renderer: &Arc<Renderer>,
         subpass: &Subpass,
-        patch: Arc<Resource<PatchView>>,
+        patch: Arc<Resource<dyn VKImageViewSource>>,
     ) -> Self {
         let buffer = FlatVertex::buffer(
             renderer.device().memory_allocator().clone(),

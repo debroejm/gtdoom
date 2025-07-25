@@ -4,6 +4,7 @@ use gtether::console::log::ConsoleLogLayer;
 use gtether::gui::window::winit::WinitDriver;
 use gtether::net::driver::NoNetDriver;
 use gtether::resource::manager::ResourceManager;
+use gtether::resource::source::constant::ConstantResourceSource;
 use gtether::EngineBuilder;
 use smol::future;
 use tracing_subscriber::prelude::*;
@@ -37,6 +38,9 @@ fn main() {
         )
     });
     let resources = ResourceManager::builder()
+        .source(ConstantResourceSource::builder()
+            .resource("console_font", include_bytes!("../assets/RobotoMono/RobotoMono-VariableFont_wght.ttf"))
+            .build())
         .source(doom2)
         .source(chex3)
         .source(zandronum)

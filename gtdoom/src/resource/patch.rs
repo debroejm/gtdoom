@@ -1,5 +1,6 @@
 use ahash::{HashMap, HashMapExt};
 use async_trait::async_trait;
+use gtether::render::image::VKImageViewSource;
 use gtether::render::{EngineDevice, Renderer};
 use gtether::resource::{ResourceLoadContext, ResourceLoadError, ResourceLoader, ResourceReadData};
 use image::{DynamicImage, ImageReader, Rgba, RgbaImage};
@@ -197,11 +198,12 @@ impl PalettedPatch {
     }
 }
 
-pub struct PatchView(Arc<ImageView>);
+#[derive(Debug, Clone)]
+struct PatchView(Arc<ImageView>);
 
-impl PatchView {
+impl VKImageViewSource for PatchView {
     #[inline]
-    pub fn image_view(&self) -> &Arc<ImageView> {
+    fn image_view(&self) -> &Arc<ImageView> {
         &self.0
     }
 }
@@ -240,21 +242,17 @@ impl PatchViewLoader {
 }
 
 #[async_trait]
-impl ResourceLoader<PatchView> for PatchViewLoader {
+impl ResourceLoader<dyn VKImageViewSource> for PatchViewLoader {
     async fn load(
         &self,
         mut data: ResourceReadData,
         ctx: ResourceLoadContext,
-    ) -> Result<Box<PatchView>, ResourceLoadError> {
+    ) -> Result<Box<dyn VKImageViewSource>, ResourceLoadError> {
         let mut raw = Vec::new();
-        data.read_to_end(&mut raw).await
-            .map_err(ResourceLoadError::from_error)?;
+        data.read_to_end(&mut raw).await?;
 
         let reader = ImageReader::new(Cursor::new(&raw))
-            .with_guessed_format()
-            // TODO: Add common error conversions such as IO errors to ResourceLoadError
-            // TODO: Rename enum variant ResourceLoadError to avoid collisions
-            .map_err(ResourceLoadError::from_error)?;
+            .with_guessed_format()?;
         let image_data = if reader.format().is_some() {
             reader.decode()
                 .map_err(ResourceLoadError::from_error)?
@@ -266,8 +264,7 @@ impl ResourceLoader<PatchView> for PatchViewLoader {
                 ctx.priority(),
             );
 
-            let patch = PalettedPatch::load(&raw)
-                .map_err(ResourceLoadError::from_error)?;
+            let patch = PalettedPatch::load(&raw)?;
             let palettes = palettes_fut.await?;
             let palettes_read = palettes.read();
             let palette = &palettes_read[0];

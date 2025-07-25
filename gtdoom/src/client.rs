@@ -1,9 +1,11 @@
 use async_trait::async_trait;
 use gtether::app::Application;
+use gtether::console::gui::{BackgroundImage, ConsoleGui, ConsoleGuiBackground};
 use gtether::console::log::ConsoleLog;
 use gtether::console::Console;
 use gtether::gui::window::winit::{CreateWindowInfo, WindowAttributes, WinitDriver};
 use gtether::net::driver::NoNetDriver;
+use gtether::render::font::glyph::GlyphFontLoader;
 use gtether::render::render_pass::EngineRenderPassBuilder;
 use gtether::resource::manager::LoadPriority;
 use gtether::Engine;
@@ -47,11 +49,29 @@ impl Application for GtdoomClient {
             ..Default::default()
         }).await;
 
-        let titlepic = engine.resources().get_or_load(
-            "TITLEPIC",
-            PatchViewLoader::new(window.renderer().clone()),
-            LoadPriority::Immediate,
-        ).await.unwrap();
+        let (titlepic, console_font) = async {
+            let titlepic = engine.resources().get_or_load(
+                "TITLEPIC",
+                PatchViewLoader::new(window.renderer().clone()),
+                LoadPriority::Immediate,
+            );
+            let console_font = engine.resources().get_or_load(
+                "console_font",
+                GlyphFontLoader::new(window.renderer().clone()),
+                LoadPriority::Immediate,
+            );
+
+            (
+                titlepic.await.unwrap(),
+                console_font.await.unwrap(),
+            )
+        }.await;
+
+        let console_gui = ConsoleGui::builder(self.console.clone())
+            .window(&window)
+            .font(console_font)
+            .background(ConsoleGuiBackground::Image(BackgroundImage::from_image(titlepic.clone())))
+            .build().unwrap();
 
         let render_pass = EngineRenderPassBuilder::new(window.renderer().clone())
             .final_color_attachment("color", [0.0, 0.0, 0.0, 1.0]).unwrap()
@@ -62,6 +82,7 @@ impl Application for GtdoomClient {
                     subpass,
                     titlepic,
                 ))
+            .handler(console_gui.bootstrap_renderer())
             .end_subpass()
             .build().unwrap();
         window.renderer().set_render_pass(render_pass);
