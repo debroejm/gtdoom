@@ -23,9 +23,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use strum::VariantArray;
-use tracing::{debug, error, info, trace, warn};
+use tracing::{error, info, trace, warn};
 
 use crate::resource::string_from_bytes_until_nul_checked;
+use crate::resource::texture::TextureFormat;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WadType {
@@ -121,18 +122,18 @@ impl LumpType {
     #[inline]
     pub fn path_prefix(&self) -> Option<PathBuf> {
         match self {
-            Self::Patch => Some(PathBuf::from("patches")),
-            Self::Sprite => Some(PathBuf::from("sprites")),
-            Self::Flat => Some(PathBuf::from("flats")),
-            Self::Graphic => Some(PathBuf::from("graphics")),
-            Self::Colormap => Some(PathBuf::from("colormaps")),
-            Self::AcsLibrary => Some(PathBuf::from("acs")),
-            Self::Texture => Some(PathBuf::from("textures")),
-            Self::HiResTexture => Some(PathBuf::from("hires")),
-            Self::Voice => Some(PathBuf::from("voices")),
-            Self::Sound => Some(PathBuf::from("sounds")),
-            Self::Music => Some(PathBuf::from("music")),
-            Self::Voxel => Some(PathBuf::from("voxels")),
+            Self::Patch => Some(PathBuf::from("Patches")),
+            Self::Sprite => Some(PathBuf::from("Sprites")),
+            Self::Flat => Some(PathBuf::from("Flats")),
+            Self::Graphic => Some(PathBuf::from("Graphics")),
+            Self::Colormap => Some(PathBuf::from("Colormaps")),
+            Self::AcsLibrary => Some(PathBuf::from("ACS")),
+            Self::Texture => Some(PathBuf::from("Textures")),
+            Self::HiResTexture => Some(PathBuf::from("HiRes")),
+            Self::Voice => Some(PathBuf::from("Voices")),
+            Self::Sound => Some(PathBuf::from("Sounds")),
+            Self::Music => Some(PathBuf::from("Music")),
+            Self::Voxel => Some(PathBuf::from("Voxels")),
             _ => None,
         }
     }
@@ -319,17 +320,31 @@ impl LumpDirectoryEntry {
 }
 
 #[derive(Debug)]
+enum WadEntryExtra {
+    None,
+    StaticPrefix(Vec<u8>),
+}
+
+#[derive(Debug)]
 struct WadEntry {
     l_type: LumpType,
     size: usize,
     offset: u32,
     hash: String,
+    extra: WadEntryExtra,
 }
 
 impl WadEntry {
     async fn read_lump(&self, mut file: smol::fs::File) -> Result<Lump, LumpFileError> {
         file.seek(SeekFrom::Start(self.offset as u64)).await?;
-        Ok(Lump::new(self.l_type, file.take(self.size as u64), self.hash.clone()))
+        let reader = file.take(self.size as u64);
+        match &self.extra {
+            WadEntryExtra::None => Ok(Lump::new(self.l_type, reader, self.hash.clone())),
+            WadEntryExtra::StaticPrefix(data) => {
+                let reader = smol::io::Cursor::new(data.clone()).chain(reader);
+                Ok(Lump::new(self.l_type, reader, self.hash.clone()))
+            }
+        }
     }
 }
 
@@ -358,6 +373,58 @@ impl Wad {
         "SCRIPTS",
         "ENDMAP",
     ];
+
+    async fn read_textures(
+        file: &mut smol::fs::File,
+        start_offset: u64,
+        data: &mut HashMap<ResourceId, WadEntry>,
+    ) -> Result<(), LumpFileError> {
+        let orig_pos = file.seek(SeekFrom::Current(0)).await?;
+        file.seek(SeekFrom::Start(start_offset)).await?;
+
+        let mut header_buf = [0; 4];
+        file.read_exact(&mut header_buf).await?;
+        let num_textures = i32::from_le_bytes(header_buf) as u32;
+
+        let mut offsets = Vec::with_capacity(num_textures as usize);
+        for _ in 0..num_textures {
+            file.read_exact(&mut header_buf).await?;
+            offsets.push(i32::from_le_bytes(header_buf) as u32);
+        }
+
+        let textures_namespace = ResourceId::from("Textures");
+
+        for offset in offsets {
+            file.seek(SeekFrom::Start(start_offset + offset as u64)).await?;
+            let mut buf = [0; 18];
+            file.read_exact(&mut buf).await?;
+            let name = string_from_bytes_until_nul_checked(&buf[0..8]);
+            let patch_count = i16::from_le_bytes(buf[16..18].try_into().unwrap());
+            let size = if patch_count == 0 {
+                // Doom format
+                let mut buf = [0; 4];
+                file.read_exact(&mut buf).await?;
+                let patch_count = i16::from_le_bytes(buf[2..4].try_into().unwrap());
+                22 + (patch_count as usize) * 10
+            } else {
+                // Strife format
+                18 + (patch_count as usize) * 6
+            };
+
+            let prefix = vec![TextureFormat::Doom.to_byte()];
+
+            data.insert(textures_namespace.join(name), WadEntry {
+                l_type: LumpType::Texture,
+                size: size - 8, // subtract 8 for the name, which we're dropping
+                offset: (start_offset as u32) + offset + 8, // Add 8 for the name
+                hash: String::new(),
+                extra: WadEntryExtra::StaticPrefix(prefix),
+            });
+        }
+
+        file.seek(SeekFrom::Start(orig_pos)).await?;
+        Ok(())
+    }
 
     async fn read(file: &mut smol::fs::File) -> Result<Self, LumpFileError> {
         file.seek(SeekFrom::Start(0)).await?;
@@ -417,6 +484,7 @@ impl Wad {
                     size,
                     offset,
                     hash: name,
+                    extra: WadEntryExtra::None,
                 });
                 lump_builder_stack.push(LumpBuilder::Type(lump_type));
             } else if name.ends_with("_END") {
@@ -444,8 +512,12 @@ impl Wad {
                     size,
                     offset,
                     hash: name,
+                    extra: WadEntryExtra::None,
                 });
                 lump_builder_stack.pop();
+            } else if &name == "TEXTURE1" || &name == "TEXTURE2" {
+                try_map_pop(&mut lump_builder_stack);
+                Self::read_textures(file, offset as u64, &mut data).await?;
             } else if map_re.is_match(&name) { // TODO: Also check map names from MAPINFO
                 try_map_pop(&mut lump_builder_stack);
                 data.insert(ResourceId::from(&name), WadEntry {
@@ -453,6 +525,7 @@ impl Wad {
                     size,
                     offset,
                     hash: name.clone(),
+                    extra: WadEntryExtra::None,
                 });
                 lump_builder_stack.push(LumpBuilder::Map(name));
             } else {
@@ -461,11 +534,17 @@ impl Wad {
                 }
                 match lump_builder_stack.last().unwrap() {
                     LumpBuilder::Type(l_type) => {
-                        data.insert(ResourceId::from(&name), WadEntry {
+                        let id = if let Some(prefix) = l_type.path_prefix() {
+                            ResourceId::from(prefix).join(&name)
+                        } else {
+                            ResourceId::from(&name)
+                        };
+                        data.insert(id, WadEntry {
                             l_type: *l_type,
                             size,
                             offset,
                             hash: String::new(),
+                            extra: WadEntryExtra::None,
                         });
                     },
                     LumpBuilder::Map(map_name) => {
@@ -474,6 +553,7 @@ impl Wad {
                             size,
                             offset,
                             hash: String::new(),
+                            extra: WadEntryExtra::None,
                         });
                     }
                 }
@@ -806,7 +886,7 @@ impl ResourceSource for LumpFileSource {
     async fn load(&self, id: &ResourceId) -> ResourceDataResult {
         let lump_file = self.state.lump_file.read();
         let lump = lump_file.load_lump(&self.file_path, id).await?;
-        debug!(path = ?self.file_path, %id, "Loading lump");
+        trace!(path = ?self.file_path, %id, "Loading lump");
         Ok(lump.into())
     }
 

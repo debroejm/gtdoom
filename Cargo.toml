@@ -5,7 +5,7 @@ members = ["gtdoom"]
 
 [workspace.package]
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [workspace.dependencies]
 ahash = "0.8"
@@ -18,10 +18,13 @@ educe = "0.6"
 #gtether = { version = "0.1", features = ["gui"] }
 gtether = { path = "../gtether/gtether", features = ["gui"] }
 image = "0.25"
-nalgebra-glm = "0.19"
+i_triangle = "0.36"
+nalgebra-glm = { version = "0.19", features = ["convert-bytemuck"] }
 notify = "8.0"
 notify-debouncer-full = "0.5"
 parking_lot = "0.12"
+parry2d = "0.22"
+parry3d = "0.22"
 quick_cache = "0.6"
 regex = "1.11"
 sanitize-filename = "0.6"

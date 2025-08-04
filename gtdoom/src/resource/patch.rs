@@ -1,87 +1,17 @@
 use ahash::{HashMap, HashMapExt};
 use async_trait::async_trait;
 use gtether::render::image::VKImageViewSource;
-use gtether::render::{EngineDevice, Renderer};
+use gtether::render::Renderer;
 use gtether::resource::{ResourceLoadContext, ResourceLoadError, ResourceLoader, ResourceReadData};
 use image::{DynamicImage, ImageReader, Rgba, RgbaImage};
-use smol::io::AsyncReadExt;
+use smol::io::{AsyncRead, AsyncReadExt};
 use std::io;
 use std::io::Cursor;
-use std::ops::Deref;
 use std::sync::Arc;
-use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer};
-use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, CopyBufferToImageInfo, PrimaryAutoCommandBuffer, PrimaryCommandBufferAbstract};
-use vulkano::format::Format;
 use vulkano::image::view::ImageView;
-use vulkano::image::{Image, ImageCreateInfo, ImageType, ImageUsage};
-use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter};
-use vulkano::sync::GpuFuture;
-use vulkano::{DeviceSize, Validated};
 
-pub struct Palette([glm::TVec3<u8>; 256]);
-
-impl Deref for Palette {
-    type Target = [glm::TVec3<u8>];
-
-    #[inline]
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl Palette {
-    fn from_raw(buffer: &[u8; 256 * 3]) -> Self {
-        Self(std::array::from_fn(|idx| glm::vec3(
-            buffer[idx * 3],
-            buffer[(idx * 3) + 1],
-            buffer[(idx * 3) + 2],
-        )))
-    }
-}
-
-pub struct Palettes(Vec<Palette>);
-
-impl Deref for Palettes {
-    type Target = Vec<Palette>;
-
-    #[inline]
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl Palettes {
-    pub const LOADER: PaletteLoader = PaletteLoader(());
-}
-
-#[derive(Clone, Copy)]
-pub struct PaletteLoader(());
-
-#[async_trait]
-impl ResourceLoader<Palettes> for PaletteLoader {
-    async fn load(
-        &self,
-        mut data: ResourceReadData,
-        _ctx: ResourceLoadContext,
-    ) -> Result<Box<Palettes>, ResourceLoadError> {
-        let mut palette_buffer = [0; 256 * 3];
-        let mut palettes = Vec::new();
-
-        'main: loop {
-            match data.read_exact(&mut palette_buffer).await {
-                Ok(()) => palettes.push(Palette::from_raw(&palette_buffer)),
-                Err(error) => {
-                    match error.kind() {
-                        std::io::ErrorKind::UnexpectedEof => break 'main,
-                        _ => return Err(ResourceLoadError::from_error(error)),
-                    }
-                }
-            }
-        };
-
-        Ok(Box::new(Palettes(palettes)))
-    }
-}
+use crate::resource::palette::{Palette, Palettes};
+use crate::resource::{string_from_bytes_until_nul_checked, upload_rgba_image};
 
 #[derive(Clone)]
 pub struct Post {
@@ -175,7 +105,7 @@ impl PalettedPatch {
         })
     }
 
-    pub fn to_rgba8(&self, palette: &Palette) -> RgbaImage {
+    pub fn to_patch(&self, palette: &Palette) -> Patch {
         let mut image = DynamicImage::new_rgba8(
             self.size.x as u32,
             self.size.y as u32,
@@ -194,7 +124,63 @@ impl PalettedPatch {
             }
         }
 
-        image
+        Patch {
+            image,
+            offset: self.offset,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Patch {
+    pub image: RgbaImage,
+    pub offset: glm::TVec2<i16>,
+}
+
+impl Patch {
+    #[inline]
+    pub fn loader() -> PatchLoader {
+        PatchLoader::default()
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct PatchLoader {}
+
+#[async_trait]
+impl ResourceLoader<Patch> for PatchLoader {
+    async fn load(
+        &self,
+        mut data: ResourceReadData,
+        ctx: ResourceLoadContext,
+    ) -> Result<Box<Patch>, ResourceLoadError> {
+        let mut raw = Vec::new();
+        data.read_to_end(&mut raw).await?;
+
+        let reader = ImageReader::new(Cursor::new(&raw))
+            .with_guessed_format()?;
+        if reader.format().is_some() {
+            let image = reader.decode()
+                .map_err(ResourceLoadError::from_error)?
+                .into_rgba8();
+            Ok(Box::new(Patch {
+                image,
+                offset: glm::vec2(0, 0),
+            }))
+        } else {
+            let palettes_fut = ctx.manager().get_or_load(
+                "PLAYPAL",
+                Palettes::LOADER,
+                ctx.priority(),
+            );
+
+            let patch = PalettedPatch::load(&raw)?;
+            let palettes = palettes_fut.await?;
+            let palettes_read = palettes.read();
+            let palette = &palettes_read[0];
+
+            Ok(Box::new(patch.to_patch(palette)))
+        }
     }
 }
 
@@ -218,108 +204,70 @@ impl PatchViewLoader {
             renderer,
         }
     }
-
-    fn build_upload_buffer(
-        device: &Arc<EngineDevice>,
-        upload_buffer: Subbuffer<[u8]>,
-        image: Arc<Image>,
-    ) -> Result<Arc<PrimaryAutoCommandBuffer>, ResourceLoadError> {
-        let mut uploads = AutoCommandBufferBuilder::primary(
-            device.command_buffer_allocator().as_ref(),
-            device.queue().queue_family_index(),
-            CommandBufferUsage::OneTimeSubmit,
-        ).map_err(Validated::unwrap).map_err(ResourceLoadError::from_error)?;
-
-        uploads.copy_buffer_to_image(CopyBufferToImageInfo::buffer_image(
-            upload_buffer,
-            image.clone(),
-        )).map_err(ResourceLoadError::from_error)?;
-
-        uploads
-            .build()
-            .map_err(Validated::unwrap).map_err(ResourceLoadError::from_error)
-    }
 }
 
 #[async_trait]
 impl ResourceLoader<dyn VKImageViewSource> for PatchViewLoader {
     async fn load(
         &self,
-        mut data: ResourceReadData,
+        data: ResourceReadData,
         ctx: ResourceLoadContext,
     ) -> Result<Box<dyn VKImageViewSource>, ResourceLoadError> {
-        let mut raw = Vec::new();
-        data.read_to_end(&mut raw).await?;
+        let patch = Patch::loader().load(
+            data,
+            ctx
+        ).await?;
 
-        let reader = ImageReader::new(Cursor::new(&raw))
-            .with_guessed_format()?;
-        let image_data = if reader.format().is_some() {
-            reader.decode()
-                .map_err(ResourceLoadError::from_error)?
-                .into_rgba8()
-        } else {
-            let palettes_fut = ctx.manager().get_or_load(
-                "PLAYPAL",
-                Palettes::LOADER,
-                ctx.priority(),
-            );
-
-            let patch = PalettedPatch::load(&raw)?;
-            let palettes = palettes_fut.await?;
-            let palettes_read = palettes.read();
-            let palette = &palettes_read[0];
-
-            patch.to_rgba8(palette)
-        };
-        let img_size = glm::vec2(image_data.width(), image_data.height());
-
-        let image = Image::new(
-            self.renderer.device().memory_allocator().clone(),
-            ImageCreateInfo {
-                image_type: ImageType::Dim2d,
-                format: Format::R8G8B8A8_SRGB,
-                extent: [img_size.x, img_size.y, 1],
-                usage: ImageUsage::TRANSFER_DST | ImageUsage::SAMPLED,
-                ..Default::default()
-            },
-            AllocationCreateInfo::default(),
-        ).map_err(Validated::unwrap).map_err(ResourceLoadError::from_error)?;
-
-        let upload_buffer = Buffer::new_slice(
-            self.renderer.device().memory_allocator().clone(),
-            BufferCreateInfo {
-                usage: BufferUsage::TRANSFER_SRC,
-                ..Default::default()
-            },
-            AllocationCreateInfo {
-                memory_type_filter: MemoryTypeFilter::PREFER_HOST
-                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                ..Default::default()
-            },
-            (img_size.x * img_size.y * 4) as DeviceSize,
-        ).map_err(Validated::unwrap).map_err(ResourceLoadError::from_error)?;
-
-        upload_buffer.write()
-            .map_err(ResourceLoadError::from_error)?
-            [..].copy_from_slice(&image_data.into_raw());
-
-        let cmd_buffer = Self::build_upload_buffer(
-            self.renderer.device(),
-            upload_buffer,
-            image.clone(),
-        )?;
-
-        cmd_buffer
-            .execute(self.renderer.device().queue().clone())
-            .map_err(ResourceLoadError::from_error)?
-            .then_signal_fence_and_flush()
-            .map_err(Validated::unwrap).map_err(ResourceLoadError::from_error)?
-            .await
-            .map_err(ResourceLoadError::from_error)?;
-
-        let image_view = ImageView::new_default(image)
-            .map_err(Validated::unwrap).map_err(ResourceLoadError::from_error)?;
+        let image_view = upload_rgba_image(
+            &self.renderer,
+            patch.image,
+        ).await?;
 
         Ok(Box::new(PatchView(image_view)))
+    }
+}
+
+pub struct PNames(Vec<String>);
+
+impl PNames {
+    #[inline]
+    pub fn loader() -> PNamesLoader {
+        PNamesLoader::default()
+    }
+
+    #[inline]
+    pub fn get(&self, idx: usize) -> Option<&str> {
+        self.0.get(idx).map(AsRef::as_ref)
+    }
+
+    pub async fn read(
+        mut reader: impl AsyncRead + Unpin,
+    ) -> Result<Self, io::Error> {
+        let mut header = [0; 4];
+        reader.read_exact(&mut header).await?;
+        let count = i32::from_le_bytes(header);
+        let mut pnames = Vec::with_capacity(count as usize);
+
+        let mut buf = [0; 8];
+        for _ in 0..count {
+            reader.read_exact(&mut buf).await?;
+            pnames.push(string_from_bytes_until_nul_checked(&buf));
+        }
+
+        Ok(Self(pnames))
+    }
+}
+
+#[derive(Default, Clone, Copy)]
+pub struct PNamesLoader {}
+
+#[async_trait]
+impl ResourceLoader<PNames> for PNamesLoader {
+    async fn load(
+        &self,
+        data: ResourceReadData,
+        _ctx: ResourceLoadContext,
+    ) -> Result<Box<PNames>, ResourceLoadError> {
+        Ok(Box::new(PNames::read(data).await?))
     }
 }

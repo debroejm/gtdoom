@@ -1,10 +1,13 @@
 pub mod linedef;
+pub mod model;
+pub mod quadtree;
 pub mod sector;
 pub mod sidedef;
 pub mod vertex;
 
 use async_trait::async_trait;
 use educe::Educe;
+use gtether::render::Renderer;
 use gtether::resource::{Resource, ResourceLoadContext, ResourceLoadError, ResourceLoader, ResourceReadData};
 use std::fmt;
 use std::fmt::Formatter;
@@ -57,12 +60,21 @@ pub struct Map {
 
 impl Map {
     #[inline]
-    pub fn loader() -> MapLoader {
-        MapLoader {}
+    pub fn loader(renderer: Arc<Renderer>) -> MapLoader {
+        MapLoader {
+            renderer,
+        }
+    }
+
+    #[inline]
+    pub fn linedefs(&self) -> &Arc<Resource<Linedefs>> {
+        &self.linedefs
     }
 }
 
-pub struct MapLoader {}
+pub struct MapLoader {
+    renderer: Arc<Renderer>,
+}
 
 #[async_trait]
 impl ResourceLoader<Map> for MapLoader {
@@ -95,7 +107,7 @@ impl ResourceLoader<Map> for MapLoader {
             MapFormat::Doom | MapFormat::Hexen => {
                 let sectors_fut = ctx.manager().get_or_load(
                     ctx.id().join("SECTORS"),
-                    Sectors::lump_loader(m_type),
+                    Sectors::lump_loader(self.renderer.clone(), m_type),
                     ctx.priority(),
                 );
                 let vertices_fut = ctx.manager().get_or_load(
@@ -105,12 +117,12 @@ impl ResourceLoader<Map> for MapLoader {
                 );
                 let sidedefs_fut = ctx.manager().get_or_load(
                     ctx.id().join("SIDEDEFS"),
-                    Sidedefs::lump_loader(m_type),
+                    Sidedefs::lump_loader(self.renderer.clone(), m_type),
                     ctx.priority(),
                 );
                 let linedefs_fut = ctx.manager().get_or_load(
                     ctx.id().join("LINEDEFS"),
-                    Linedefs::lump_loader(m_type, m_format),
+                    Linedefs::lump_loader(self.renderer.clone(), m_type, m_format),
                     ctx.priority(),
                 );
 

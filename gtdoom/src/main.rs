@@ -13,9 +13,9 @@ use tracing_subscriber::EnvFilter;
 use crate::client::GtdoomClient;
 use crate::resource::lump::LumpFileSource;
 
-mod resource;
 mod client;
-mod render_test;
+mod render;
+mod resource;
 
 fn main() {
     let app = GtdoomClient::new();
@@ -41,7 +41,7 @@ fn main() {
         .source(ConstantResourceSource::builder()
             .resource("console_font", include_bytes!("../assets/RobotoMono/RobotoMono-VariableFont_wght.ttf"))
             .build())
-        .source(doom2)
+        //.source(doom2)
         .source(chex3)
         .source(zandronum)
         .build();

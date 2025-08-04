@@ -1,10 +1,12 @@
-use std::ops::Deref;
 use async_trait::async_trait;
 use gtether::resource::{ResourceLoadContext, ResourceLoadError, ResourceLoader, ResourceReadData};
+use i_triangle::i_overlay::i_float::float::compatible::FloatPointCompatible;
 use smol::io::{AsyncRead, AsyncReadExt};
+use std::ops::Deref;
 use tracing::debug;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(transparent)]
 pub struct Vertex(glm::TVec2<i16>);
 
 impl Deref for Vertex {
@@ -24,6 +26,54 @@ impl Vertex {
             i16::from_le_bytes(bytes[0..2].try_into().unwrap()),
             i16::from_le_bytes(bytes[2..4].try_into().unwrap()),
         ))
+    }
+    
+    #[inline]
+    pub fn to_3d(&self, z: f32) -> glm::TVec3<f32> {
+        glm::vec3(self.x as f32, self.y as f32, z)
+    }
+
+    #[inline]
+    pub fn to_float(&self) -> FloatVertex {
+        FloatVertex(self.0.cast::<f32>())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[repr(transparent)]
+pub struct FloatVertex(glm::TVec2<f32>);
+
+impl FloatVertex {
+    #[inline]
+    pub fn equal_eps(&self, other: &FloatVertex, epsilon: f32) -> bool {
+        let b = glm::equal_eps(self, other, epsilon);
+        b.x && b.y
+    }
+}
+
+impl FloatPointCompatible<f32> for FloatVertex {
+    #[inline]
+    fn from_xy(x: f32, y: f32) -> Self {
+        Self(glm::vec2(x, y))
+    }
+
+    #[inline]
+    fn x(&self) -> f32 {
+        self.0.x
+    }
+
+    #[inline]
+    fn y(&self) -> f32 {
+        self.0.y
+    }
+}
+
+impl Deref for FloatVertex {
+    type Target = glm::TVec2<f32>;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }
 

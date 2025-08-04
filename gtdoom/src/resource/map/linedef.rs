@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use bitflags::bitflags;
+use gtether::render::Renderer;
 use gtether::resource::{Resource, ResourceLoadContext, ResourceLoadError, ResourceLoader, ResourceReadData};
 use smol::io::{AsyncRead, AsyncReadExt};
 use std::ops::Deref;
@@ -47,6 +48,7 @@ bitflags! {
         const Mapped = 0x0100;
     }
 
+    #[derive(Debug, Clone, Copy)]
     pub struct LinedefStrifeFlags: u16 {
         const Blocking = 0x0001;
         const BlockMonsters = 0x0002;
@@ -353,8 +355,13 @@ impl Deref for Linedefs {
 
 impl Linedefs {
     #[inline]
-    pub fn lump_loader(map_type: MapType, map_format: MapFormat) -> LinedefsLumpLoader {
+    pub fn lump_loader(
+        renderer: Arc<Renderer>,
+        map_type: MapType,
+        map_format: MapFormat,
+    ) -> LinedefsLumpLoader {
         LinedefsLumpLoader {
+            renderer,
             map_type,
             map_format,
         }
@@ -421,6 +428,7 @@ impl Linedefs {
 }
 
 pub struct LinedefsLumpLoader {
+    renderer: Arc<Renderer>,
     map_type: MapType,
     map_format: MapFormat,
 }
@@ -439,7 +447,7 @@ impl ResourceLoader<Linedefs> for LinedefsLumpLoader {
         );
         let sidedefs_fut = ctx.manager().get_or_load(
             ctx.id().parent().join("SIDEDEFS"),
-            Sidedefs::lump_loader(self.map_type),
+            Sidedefs::lump_loader(self.renderer.clone(), self.map_type),
             ctx.priority(),
         );
         Ok(Box::new(Linedefs::read(

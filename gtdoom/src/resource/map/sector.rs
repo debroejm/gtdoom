@@ -1,13 +1,17 @@
+use async_trait::async_trait;
+use bitflags::bitflags;
+use gtether::render::Renderer;
+use gtether::resource::id::ResourceId;
+use gtether::resource::{Resource, ResourceLoadContext, ResourceLoadError, ResourceLoader, ResourceReadData};
+use smol::io::AsyncReadExt;
 use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
-use async_trait::async_trait;
-use bitflags::bitflags;
-use gtether::resource::{ResourceLoadContext, ResourceLoadError, ResourceLoader, ResourceReadData};
-use smol::io::{AsyncRead, AsyncReadExt};
 use tracing::debug;
+
 use crate::resource::map::MapType;
 use crate::resource::string_from_bytes_until_nul_checked;
+use crate::resource::texture::Texture;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpecialAlt {
@@ -432,9 +436,11 @@ bitflags! {
 
 #[derive(Debug, Clone)]
 pub struct Sector {
+    pub idx: usize,
     pub floor_height: i16,
     pub ceil_height: i16,
-    // TODO: floor/ceil textures
+    pub floor_tex: Arc<Resource<Texture>>,
+    pub ceil_tex: Arc<Resource<Texture>>,
     pub light_level: u8,
     pub special: Option<SectorSpecial>,
     pub special_flags: SectorSpecialFlags,
@@ -445,7 +451,39 @@ pub struct Sector {
 impl Sector {
     pub const BYTE_COUNT: usize = 26;
 
-    pub fn from_bytes(bytes: &[u8; Self::BYTE_COUNT], map_type: MapType) -> Self {
+    async fn load_texture(
+        name: &str,
+        renderer: &Arc<Renderer>,
+        ctx: &ResourceLoadContext,
+    ) -> Result<Arc<Resource<Texture>>, ResourceLoadError> {
+        // Prefer flats first
+        let result = ctx.manager().get_or_load(
+            ResourceId::from("Flats").join(name),
+            Texture::flat_loader(renderer.clone()),
+            ctx.priority(),
+        ).await;
+
+        match result {
+            Ok(flat) => Ok(flat),
+            Err(ResourceLoadError::NotFound(_)) => {
+                let tex = ctx.manager().get_or_load(
+                    ResourceId::from("Textures").join(name),
+                    Texture::loader(renderer.clone()),
+                    ctx.priority(),
+                ).await?;
+                Ok(tex)
+            },
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn load(
+        idx: usize,
+        bytes: &[u8; Self::BYTE_COUNT],
+        map_type: MapType,
+        renderer: &Arc<Renderer>,
+        ctx: &ResourceLoadContext,
+    ) -> Result<Self, ResourceLoadError> {
         let floor_height = i16::from_le_bytes(bytes[0..2].try_into().unwrap());
         let ceil_height = i16::from_le_bytes(bytes[2..4].try_into().unwrap());
         let floor_tex_name = string_from_bytes_until_nul_checked(&bytes[4..12]);
@@ -458,15 +496,21 @@ impl Sector {
         let flags = SectorFlags::empty();
         let tag = i16::from_le_bytes(bytes[24..26].try_into().unwrap()) as u16;
 
-        Self {
+        let floor_tex = Self::load_texture(&floor_tex_name, renderer, ctx).await?;
+        let ceil_tex = Self::load_texture(&ceil_tex_name, renderer, ctx).await?;
+
+        Ok(Self {
+            idx,
             floor_height,
             ceil_height,
+            floor_tex,
+            ceil_tex,
             light_level,
             special,
             special_flags,
             flags,
             tag,
-        }
+        })
     }
 }
 
@@ -483,33 +527,16 @@ impl Deref for Sectors {
 
 impl Sectors {
     #[inline]
-    pub fn lump_loader(map_type: MapType) -> SectorsLumpLoader {
+    pub fn lump_loader(renderer: Arc<Renderer>, map_type: MapType) -> SectorsLumpLoader {
         SectorsLumpLoader {
+            renderer,
             map_type,
         }
-    }
-
-    pub async fn read(
-        mut reader: impl AsyncRead + Unpin,
-        map_type: MapType,
-    ) -> Result<Self, std::io::Error> {
-        let mut bytes = [0; Sector::BYTE_COUNT];
-        let mut sectors = Vec::new();
-        loop {
-            match reader.read_exact(&mut bytes).await {
-                Ok(()) => sectors.push(Arc::new(Sector::from_bytes(&bytes, map_type))),
-                Err(error) => match error.kind() {
-                    std::io::ErrorKind::UnexpectedEof => break,
-                    _ => return Err(error),
-                }
-            }
-        }
-        debug!(count = ?sectors.len(), "Loaded Sectors");
-        Ok(Self(sectors))
     }
 }
 
 pub struct SectorsLumpLoader {
+    renderer: Arc<Renderer>,
     map_type: MapType,
 }
 
@@ -517,9 +544,27 @@ pub struct SectorsLumpLoader {
 impl ResourceLoader<Sectors> for SectorsLumpLoader {
     async fn load(
         &self,
-        data: ResourceReadData,
-        _ctx: ResourceLoadContext,
+        mut data: ResourceReadData,
+        ctx: ResourceLoadContext,
     ) -> Result<Box<Sectors>, ResourceLoadError> {
-        Ok(Box::new(Sectors::read(data, self.map_type).await?))
+        let mut bytes = [0; Sector::BYTE_COUNT];
+        let mut sectors = Vec::new();
+        loop {
+            match data.read_exact(&mut bytes).await {
+                Ok(()) => sectors.push(Arc::new(Sector::load(
+                    sectors.len(),
+                    &bytes,
+                    self.map_type,
+                    &self.renderer,
+                    &ctx,
+                ).await?)),
+                Err(error) => match error.kind() {
+                    std::io::ErrorKind::UnexpectedEof => break,
+                    _ => return Err(ResourceLoadError::from_error(error)),
+                }
+            }
+        }
+        debug!(count = ?sectors.len(), "Loaded Sectors");
+        Ok(Box::new(Sectors(sectors)))
     }
 }
