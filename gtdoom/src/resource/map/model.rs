@@ -61,11 +61,11 @@ impl MapVertex {
         if !(pos.x && pos.y && pos.z) {
             return false
         }
-        let uv = glm::equal_eps(&self.uv, &other.uv, epsilon);
+        let uv = glm::equal_eps(&self.uv, &other.uv, 0.001);
         if !(uv.x && uv.y) {
             return false
         }
-        if !((self.light - other.light).abs() < epsilon) {
+        if (self.light - other.light).abs() >= 0.001 {
             return false
         }
         self.tag == other.tag
@@ -579,8 +579,8 @@ impl ChunkBuilder {
 
             let pin_top = match location {
                 SidedefLocation::Upper => linedef.flags.contains(LinedefFlags::DontPegTop),
-                SidedefLocation::Middle => true,
-                SidedefLocation::Lower => !linedef.flags.contains(LinedefFlags::DontPegBottom),
+                SidedefLocation::Middle | SidedefLocation::Lower =>
+                    !linedef.flags.contains(LinedefFlags::DontPegBottom),
             };
 
             let (uv_a, uv_b) = if pin_top {
