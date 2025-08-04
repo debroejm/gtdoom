@@ -4,26 +4,103 @@ use gtether::console::gui::{BackgroundImage, ConsoleGui, ConsoleGuiBackground};
 use gtether::console::log::ConsoleLog;
 use gtether::console::Console;
 use gtether::gui::input::{InputDelegateEvent, InputStateLayer, KeyCode, MouseButton, MouseScrollDelta};
-use gtether::gui::window::winit::{CreateWindowInfo, WindowAttributes, WinitDriver};
+use gtether::gui::window::winit::{CreateWindowInfo, WindowAttributes, WindowHandle, WinitDriver};
 use gtether::net::driver::NoNetDriver;
 use gtether::render::font::glyph::GlyphFontLoader;
 use gtether::render::render_pass::EngineRenderPassBuilder;
-use gtether::resource::manager::LoadPriority;
+use gtether::resource::manager::{LoadPriority, ResourceManager};
 use gtether::util::tick_loop::{TickLoopBuilder, TickLoopHandle};
 use gtether::Engine;
 use parking_lot::Mutex;
 use std::sync::Arc;
+use educe::Educe;
+use gtether::console::command::{Command, CommandError, CommandRegistry, ParamCountCheck};
+use gtether::render::uniform::Uniform;
 use parry3d::na::{Isometry3, Point3, Translation3};
-use tracing::info;
+use smol::future;
+use tracing::{debug, info};
 use vulkano::device::Features;
 use vulkano::format::Format;
 use vulkano::image::SampleCount;
 use vulkano::render_pass::{AttachmentDescription, AttachmentLoadOp, AttachmentStoreOp};
 
-use crate::render::camera::Camera;
+use crate::render::camera::{Camera, VP};
 use crate::resource::map::model::{Chunk, MapModelData, MapRenderer};
 use crate::resource::map::Map;
 use crate::resource::patch::PatchViewLoader;
+
+#[derive(Educe)]
+#[educe(Debug)]
+struct ChangeMapCommand {
+    window: WindowHandle,
+    #[educe(Debug(ignore))]
+    resources: Arc<ResourceManager>,
+    #[educe(Debug(ignore))]
+    console_gui: Arc<ConsoleGui>,
+    #[educe(Debug(ignore))]
+    camera: Arc<Uniform<VP, Camera>>,
+}
+
+impl Command for ChangeMapCommand {
+    fn handle(&self, parameters: &[String]) -> Result<(), CommandError> {
+        ParamCountCheck::Equal(1).check(parameters.len() as u32)?;
+
+        let map_name = parameters[0].as_str();
+        let map = future::block_on(self.resources.get_or_load(
+            map_name,
+            Map::loader(self.window.renderer().clone()),
+            LoadPriority::Immediate,
+        )).map_err(|e| CommandError::CommandFailure(Box::new(e)))?;
+        info!(?map_name, ?map, "Loaded map");
+
+        let (chunk, map_model_data) = {
+            let mut builder = Chunk::builder();
+            for linedef in map.read().linedefs().read().iter() {
+                builder.add_linedef(linedef);
+            }
+            let mut map_model_data = MapModelData::default();
+            let chunk = Arc::new(builder.build(&mut map_model_data).unwrap());
+            (chunk, map_model_data)
+        };
+        debug!(?map_name, "Parsed map model data");
+
+        let renderer_camera = self.camera.clone();
+        {
+            let mut lock = renderer_camera.write();
+            lock.view_mut().set_eye(glm::vec3(-500.0, -500.0, 1000.0));
+            lock.view_mut().set_target(glm::vec3(0.0, 0.0, 0.0));
+        }
+
+        let render_pass = EngineRenderPassBuilder::new(self.window.renderer().clone())
+            .attachment("depth", AttachmentDescription {
+                format: Format::D16_UNORM,
+                samples: SampleCount::Sample1,
+                load_op: AttachmentLoadOp::Clear,
+                store_op: AttachmentStoreOp::DontCare,
+                ..Default::default()
+            }, Some(1.0))
+            .final_color_attachment("color", [0.0, 0.0, 0.0, 1.0]).unwrap()
+            .begin_subpass()
+            .depth_stencil_attachment("depth")
+            .color_attachment("color")
+            .handler(move |renderer, subpass| MapRenderer::new(
+                renderer_camera,
+                chunk,
+                map_model_data,
+                renderer,
+                subpass,
+            ).unwrap())
+            .end_subpass()
+            .begin_subpass()
+            .color_attachment("color")
+            .handler(self.console_gui.bootstrap_renderer())
+            .end_subpass()
+            .build().unwrap();
+        self.window.renderer().set_render_pass(render_pass);
+
+        Ok(())
+    }
+}
 
 pub struct GtdoomClient {
     console: Arc<Console>,
@@ -84,30 +161,12 @@ impl Application for GtdoomClient {
             )
         }.await;
 
-        let map_name = "E1M1";
-        let map = engine.resources().get_or_load(
-            map_name,
-            Map::loader(window.renderer().clone()),
-            LoadPriority::Immediate,
-        ).await.unwrap();
-        info!(?map_name, ?map, "Loaded map");
-
         let camera = Camera::new_uniform(
             window.renderer(),
             glm::vec3(-500.0, -500.0, 1000.0),
             glm::vec3(0.0, 0.0, 0.0),
         ).unwrap();
         let input_camera = camera.clone();
-
-        let (chunk, map_model_data) = {
-            let mut builder = Chunk::builder();
-            for linedef in map.read().linedefs().read().iter() {
-                builder.add_linedef(linedef);
-            }
-            let mut map_model_data = MapModelData::default();
-            let chunk = Arc::new(builder.build(&mut map_model_data).unwrap());
-            (chunk, map_model_data)
-        };
 
         let console_gui = ConsoleGui::builder(self.console.clone())
             .window(&window)
@@ -116,25 +175,7 @@ impl Application for GtdoomClient {
             .build().unwrap();
 
         let render_pass = EngineRenderPassBuilder::new(window.renderer().clone())
-            .attachment("depth", AttachmentDescription {
-                format: Format::D16_UNORM,
-                samples: SampleCount::Sample1,
-                load_op: AttachmentLoadOp::Clear,
-                store_op: AttachmentStoreOp::DontCare,
-                ..Default::default()
-            }, Some(1.0))
             .final_color_attachment("color", [0.0, 0.0, 0.0, 1.0]).unwrap()
-            .begin_subpass()
-                .depth_stencil_attachment("depth")
-                .color_attachment("color")
-                .handler(move |renderer, subpass| MapRenderer::new(
-                    camera,
-                    chunk,
-                    map_model_data,
-                    renderer,
-                    subpass,
-                ).unwrap())
-            .end_subpass()
             .begin_subpass()
                 .color_attachment("color")
                 .handler(console_gui.bootstrap_renderer())
@@ -215,6 +256,14 @@ impl Application for GtdoomClient {
             })
             .spawn().unwrap()
         );
+
+        let mut cmd_registry = self.console.registry();
+        cmd_registry.register_command("changemap", Box::new(ChangeMapCommand {
+            window,
+            resources: engine.resources().clone(),
+            console_gui,
+            camera,
+        })).unwrap();
     }
 
     async fn terminate(&self, _engine: &Arc<Engine<Self>>) {

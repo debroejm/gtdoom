@@ -26,25 +26,20 @@ fn main() {
         .with(ConsoleLogLayer::new(app.console().log()))
         .init();
 
-    let (doom2, chex3, zandronum) = future::block_on(async move {
-        let doom2 = LumpFileSource::open("DOOM2.WAD");
-        let chex3 = LumpFileSource::open("chex3.wad");
-        let zandronum = LumpFileSource::open("zandronum.pk3");
-
-        (
-            doom2.await.unwrap(),
-            chex3.await.unwrap(),
-            zandronum.await.unwrap(),
-        )
-    });
-    let resources = ResourceManager::builder()
-        .source(ConstantResourceSource::builder()
-            .resource("console_font", include_bytes!("../assets/RobotoMono/RobotoMono-VariableFont_wght.ttf"))
-            .build())
-        //.source(doom2)
-        .source(chex3)
-        .source(zandronum)
-        .build();
+    let resources = {
+        let mut builder = ResourceManager::builder()
+            .source(ConstantResourceSource::builder()
+                .resource("console_font", include_bytes!("../assets/RobotoMono/RobotoMono-VariableFont_wght.ttf"))
+                .build());
+        let sources = std::env::args()
+            .skip(1)
+            .map(|arg| future::block_on(LumpFileSource::open(arg)).unwrap())
+            .collect::<Vec<_>>();
+        for source in sources {
+            builder = builder.source(source);
+        }
+        builder.build()
+    };
 
     EngineBuilder::new()
         .app(app)
@@ -55,7 +50,4 @@ fn main() {
         .resources(resources)
         .build()
         .start();
-
-/*    let wad = future::block_on(WadData::open_wad("chex3.wad")).unwrap();
-    println!("WAD type = {}", wad.w_type());*/
 }
