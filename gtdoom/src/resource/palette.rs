@@ -1,7 +1,8 @@
-use std::ops::Deref;
 use async_trait::async_trait;
-use gtether::resource::{ResourceLoadContext, ResourceLoadError, ResourceLoader, ResourceReadData};
+use gtether::resource::manager::ResourceLoadContext;
+use gtether::resource::{ResourceDefaultLoader, ResourceLoadError, ResourceLoader, ResourceReadData};
 use smol::io::AsyncReadExt;
+use std::ops::Deref;
 
 pub struct Palette([glm::TVec3<u8>; 256]);
 
@@ -35,8 +36,12 @@ impl Deref for Palettes {
     }
 }
 
-impl Palettes {
-    pub const LOADER: PaletteLoader = PaletteLoader(());
+impl ResourceDefaultLoader for Palettes {
+    type Loader = PaletteLoader;
+
+    fn default_loader() -> Self::Loader {
+        PaletteLoader(())
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -47,7 +52,7 @@ impl ResourceLoader<Palettes> for PaletteLoader {
     async fn load(
         &self,
         mut data: ResourceReadData,
-        _ctx: ResourceLoadContext,
+        _ctx: &ResourceLoadContext,
     ) -> Result<Box<Palettes>, ResourceLoadError> {
         let mut palette_buffer = [0; 256 * 3];
         let mut palettes = Vec::new();

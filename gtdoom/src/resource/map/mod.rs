@@ -8,10 +8,12 @@ pub mod vertex;
 use async_trait::async_trait;
 use educe::Educe;
 use gtether::render::Renderer;
-use gtether::resource::{Resource, ResourceLoadContext, ResourceLoadError, ResourceLoader, ResourceReadData};
+use gtether::resource::manager::ResourceLoadContext;
+use gtether::resource::{Resource, ResourceLoadError, ResourceLoader, ResourceReadData};
 use std::fmt;
 use std::fmt::Formatter;
 use std::ops::Deref;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::resource::lump::MarkerLump;
@@ -81,17 +83,13 @@ impl ResourceLoader<Map> for MapLoader {
     async fn load(
         &self,
         _data: ResourceReadData,
-        ctx: ResourceLoadContext,
+        ctx: &ResourceLoadContext,
     ) -> Result<Box<Map>, ResourceLoadError> {
-        let endmap_fut = ctx.manager().get_or_load(
-            ctx.id().join("ENDMAP"),
-            MarkerLump::loader(),
-            ctx.priority(),
+        let endmap_fut = ctx.get::<MarkerLump>(
+            PathBuf::from(ctx.id().as_str()).join("ENDMAP")
         );
-        let behavior_fut = ctx.manager().get_or_load(
-            ctx.id().join("BEHAVIOR"),
-            MarkerLump::loader(),
-            ctx.priority(),
+        let behavior_fut = ctx.get::<MarkerLump>(
+            PathBuf::from(ctx.id().as_str()).join("BEHAVIOR")
         );
         let (m_type, m_format) = match endmap_fut.await {
             // TODO: parse map_type from UDMF namespace
@@ -105,25 +103,21 @@ impl ResourceLoader<Map> for MapLoader {
 
         match m_format {
             MapFormat::Doom | MapFormat::Hexen => {
-                let sectors_fut = ctx.manager().get_or_load(
-                    ctx.id().join("SECTORS"),
+                let sectors_fut = ctx.get_with_loader(
+                    PathBuf::from(ctx.id().as_str()).join("SECTORS"),
                     Sectors::lump_loader(self.renderer.clone(), m_type),
-                    ctx.priority(),
                 );
-                let vertices_fut = ctx.manager().get_or_load(
-                    ctx.id().join("VERTEXES"),
+                let vertices_fut = ctx.get_with_loader(
+                    PathBuf::from(ctx.id().as_str()).join("VERTEXES"),
                     Vertices::lump_loader(),
-                    ctx.priority(),
                 );
-                let sidedefs_fut = ctx.manager().get_or_load(
-                    ctx.id().join("SIDEDEFS"),
+                let sidedefs_fut = ctx.get_with_loader(
+                    PathBuf::from(ctx.id().as_str()).join("SIDEDEFS"),
                     Sidedefs::lump_loader(self.renderer.clone(), m_type),
-                    ctx.priority(),
                 );
-                let linedefs_fut = ctx.manager().get_or_load(
-                    ctx.id().join("LINEDEFS"),
+                let linedefs_fut = ctx.get_with_loader(
+                    PathBuf::from(ctx.id().as_str()).join("LINEDEFS"),
                     Linedefs::lump_loader(self.renderer.clone(), m_type, m_format),
-                    ctx.priority(),
                 );
 
                 Ok(Box::new(Map {

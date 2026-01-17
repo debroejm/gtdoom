@@ -1,10 +1,11 @@
 use async_trait::async_trait;
 use bitflags::bitflags;
 use gtether::render::Renderer;
-use gtether::resource::id::ResourceId;
-use gtether::resource::{Resource, ResourceLoadContext, ResourceLoadError, ResourceLoader, ResourceReadData};
+use gtether::resource::manager::ResourceLoadContext;
+use gtether::resource::{Resource, ResourceLoadError, ResourceLoader, ResourceReadData};
 use smol::io::AsyncReadExt;
 use std::ops::Deref;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::debug;
@@ -457,19 +458,17 @@ impl Sector {
         ctx: &ResourceLoadContext,
     ) -> Result<Arc<Resource<Texture>>, ResourceLoadError> {
         // Prefer flats first
-        let result = ctx.manager().get_or_load(
-            ResourceId::from("Flats").join(name),
+        let result = ctx.get_with_loader(
+            PathBuf::from("Flats").join(name),
             Texture::flat_loader(renderer.clone()),
-            ctx.priority(),
         ).await;
 
         match result {
             Ok(flat) => Ok(flat),
             Err(ResourceLoadError::NotFound(_)) => {
-                let tex = ctx.manager().get_or_load(
-                    ResourceId::from("Textures").join(name),
+                let tex = ctx.get_with_loader(
+                    PathBuf::from("Textures").join(name),
                     Texture::loader(renderer.clone()),
-                    ctx.priority(),
                 ).await?;
                 Ok(tex)
             },
@@ -545,7 +544,7 @@ impl ResourceLoader<Sectors> for SectorsLumpLoader {
     async fn load(
         &self,
         mut data: ResourceReadData,
-        ctx: ResourceLoadContext,
+        ctx: &ResourceLoadContext,
     ) -> Result<Box<Sectors>, ResourceLoadError> {
         let mut bytes = [0; Sector::BYTE_COUNT];
         let mut sectors = Vec::new();
@@ -556,7 +555,7 @@ impl ResourceLoader<Sectors> for SectorsLumpLoader {
                     &bytes,
                     self.map_type,
                     &self.renderer,
-                    &ctx,
+                    ctx,
                 ).await?)),
                 Err(error) => match error.kind() {
                     std::io::ErrorKind::UnexpectedEof => break,

@@ -5,12 +5,13 @@ use async_zip::error::ZipError;
 use base64::prelude::BASE64_STANDARD;
 use base64::Engine;
 use educe::Educe;
+use gtether::console::command::{Command, CommandError, ParamCountCheck};
 use gtether::resource::id::ResourceId;
-use gtether::resource::source::{ResourceData, ResourceDataResult, ResourceDataSource, ResourceSource, ResourceUpdate, ResourceWatcher, SourceIndex};
-use gtether::resource::{ResourceLoadContext, ResourceLoadError, ResourceLoader, ResourceReadData};
-use notify::event::{ModifyKind, RenameMode};
-use notify_debouncer_full::{new_debouncer, DebounceEventResult, Debouncer};
-use parking_lot::RwLock;
+use gtether::resource::manager::ResourceLoadContext;
+use gtether::resource::source::fs::{ResourceSourceFile, ResourceSourceFilesHandle};
+use gtether::resource::source::{ResourceData, ResourceDataResult, ResourceDataSource, ResourceSource, ResourceUpdate};
+use gtether::resource::watcher::{ResourceHashProvider, ResourceWatcher};
+use gtether::resource::{ResourceDefaultLoader, ResourceLoadError, ResourceLoader, ResourceReadData};
 use regex::RegexBuilder;
 use sha2::{Digest, Sha256};
 use smol::future;
@@ -21,9 +22,8 @@ use std::fmt::{Debug, Display, Formatter};
 use std::io::{Error as IoError, ErrorKind as IoErrorKind, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 use strum::VariantArray;
-use tracing::{error, info, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 
 use crate::resource::string_from_bytes_until_nul_checked;
 use crate::resource::texture::TextureFormat;
@@ -237,16 +237,6 @@ pub enum LumpFileError {
     Other(Box<dyn Error + Send + Sync>),
 }
 
-impl From<notify::Error> for LumpFileError {
-    #[inline]
-    fn from(value: notify::Error) -> Self {
-        match value.kind {
-            notify::ErrorKind::Io(err) => Self::ReadError(err),
-            ref _kind => Self::Other(Box::new(value)),
-        }
-    }
-}
-
 impl From<ZipError> for LumpFileError {
     #[inline]
     fn from(value: ZipError) -> Self {
@@ -392,7 +382,7 @@ impl Wad {
             offsets.push(i32::from_le_bytes(header_buf) as u32);
         }
 
-        let textures_namespace = ResourceId::from("Textures");
+        let textures_namespace = PathBuf::from("Textures");
 
         for offset in offsets {
             file.seek(SeekFrom::Start(start_offset + offset as u64)).await?;
@@ -413,7 +403,7 @@ impl Wad {
 
             let prefix = vec![TextureFormat::Doom.to_byte()];
 
-            data.insert(textures_namespace.join(name), WadEntry {
+            data.insert(textures_namespace.join(name).into(), WadEntry {
                 l_type: LumpType::Texture,
                 size: size - 8, // subtract 8 for the name, which we're dropping
                 offset: (start_offset as u32) + offset + 8, // Add 8 for the name
@@ -535,7 +525,7 @@ impl Wad {
                 match lump_builder_stack.last().unwrap() {
                     LumpBuilder::Type(l_type) => {
                         let id = if let Some(prefix) = l_type.path_prefix() {
-                            ResourceId::from(prefix).join(&name)
+                            ResourceId::from(prefix.join(&name))
                         } else {
                             ResourceId::from(&name)
                         };
@@ -548,7 +538,7 @@ impl Wad {
                         });
                     },
                     LumpBuilder::Map(map_name) => {
-                        data.insert(ResourceId::from(map_name).join(name), WadEntry {
+                        data.insert(PathBuf::from(map_name).join(name).into(), WadEntry {
                             l_type: LumpType::Map,
                             size,
                             offset,
@@ -663,13 +653,13 @@ impl Zip {
 }
 
 #[derive(Debug)]
-enum LumpFile {
+enum LumpFileType {
     None,
     Wad(Wad),
     Zip(Zip),
 }
 
-impl LumpFile {
+impl LumpFileType {
     async fn read(path: &Path) -> Result<Self, LumpFileError> {
         let mut file = smol::fs::File::open(path).await?;
         match path.extension().and_then(OsStr::to_str).map(|s| s.to_lowercase()) {
@@ -722,22 +712,31 @@ impl LumpFile {
         }
     }
 
-    fn diff_hashes(&self, other: &LumpFile) -> HashMap<ResourceId, ResourceUpdate> {
+    // TODO: create a better watcher iterator for this
+    fn diff_hashes(
+        &self,
+        other: &LumpFileType,
+        watcher: &ResourceWatcher,
+    ) -> HashMap<ResourceId, ResourceUpdate> {
         let mut diff = HashMap::new();
 
         for (id, hash) in self.hashes() {
-            if let Some(other_hash) = other.hash(id) {
-                if hash != other_hash {
-                    diff.insert(id.clone(), ResourceUpdate::Modified(hash.clone()));
+            if watcher.is_watched(id) {
+                if let Some(other_hash) = other.hash(id) {
+                    if hash != other_hash {
+                        diff.insert(id.clone(), ResourceUpdate::Modified(hash.clone()));
+                    }
+                } else {
+                    diff.insert(id.clone(), ResourceUpdate::Added(hash.clone()));
                 }
-            } else {
-                diff.insert(id.clone(), ResourceUpdate::Added(hash.clone()));
             }
         }
 
         for (id, _) in other.hashes() {
-            if self.hash(id).is_none() {
-                diff.insert(id.clone(), ResourceUpdate::Removed);
+            if watcher.is_watched(id) {
+                if self.hash(id).is_none() {
+                    diff.insert(id.clone(), ResourceUpdate::Removed);
+                }
             }
         }
 
@@ -775,147 +774,273 @@ impl<'a> Iterator for LumpFileHashIter<'a> {
 
 impl<'a> ExactSizeIterator for LumpFileHashIter<'a> {}
 
-#[derive(Debug)]
-struct State {
-    lump_file: RwLock<LumpFile>,
-    watchers: RwLock<HashMap<ResourceId, Box<dyn ResourceWatcher>>>,
-}
-
-impl State {
-    fn set_lump_file(&self, new_lump_file: LumpFile) {
-        let watchers = self.watchers.read();
-        let mut lump_file = self.lump_file.write();
-
-        let diff = new_lump_file.diff_hashes(&lump_file);
-        *lump_file = new_lump_file;
-        for (key, update) in diff {
-            if let Some(watcher) = watchers.get(&key) {
-                watcher.notify_update(&key, update);
-            }
-        }
-    }
-
-    async fn reload(&self, path: &Path) -> Result<(), LumpFileError> {
-        let new_lump_file = LumpFile::read(path).await?;
-        let lump_count = new_lump_file.hashes().len();
-        info!(?path, ?lump_count, "Loaded lump file source");
-
-        self.set_lump_file(new_lump_file);
-
-        Ok(())
-    }
-
-    fn clear(&self) {
-        self.set_lump_file(LumpFile::None);
-    }
-}
-
-#[derive(Debug)]
-pub struct LumpFileSource {
-    file_path: PathBuf,
-    #[allow(unused)]
-    file_watcher: Debouncer<notify::RecommendedWatcher, notify_debouncer_full::RecommendedCache>,
-    state: Arc<State>,
-}
-
-impl LumpFileSource {
+impl ResourceHashProvider for LumpFileType {
     #[inline]
-    pub async fn open<P>(path: P) -> Result<Self, LumpFileError>
-    where
-        P: AsRef<Path>
-    {
+    fn hash(&self, id: &ResourceId) -> Option<String> {
+        LumpFileType::hash(self, id).cloned()
+    }
+}
+
+#[derive(Debug)]
+pub struct LumpFile {
+    path: PathBuf,
+    inner: Arc<smol::lock::RwLock<LumpFileType>>,
+    watcher: ResourceWatcher,
+}
+
+impl LumpFile {
+    #[inline]
+    pub async fn open(path: impl AsRef<Path>) -> Result<Self, LumpFileError> {
         Self::open_impl(path.as_ref()).await
     }
 
     async fn open_impl(path: &Path) -> Result<Self, LumpFileError> {
-        let lump_file = LumpFile::read(path).await?;
-        let lump_count = lump_file.hashes().len();
-        info!(?path, ?lump_count, "Loaded lump file source");
-        let file_path = path.to_path_buf();
-
-        let state = Arc::new(State {
-            lump_file: RwLock::new(lump_file),
-            watchers: RwLock::new(HashMap::new()),
-        });
-
-        let cb_file_path = file_path.clone();
-        let cb_state = state.clone();
-        let mut file_watcher = new_debouncer(
-            Duration::from_secs(1),
-            None,
-            move |result: DebounceEventResult| {
-                if let Ok(events) = result {
-                    for event in events {
-                        match event.kind {
-                            notify::EventKind::Create(_) |
-                            notify::EventKind::Modify(ModifyKind::Data(_)) |
-                            notify::EventKind::Modify(ModifyKind::Name(RenameMode::To)) => {
-                                info!(path = ?cb_file_path, "Reloading lump file source");
-                                if let Err(error) = future::block_on(cb_state.reload(&cb_file_path)) {
-                                    error!(path = ?cb_file_path, ?error, "Failed to reload lump file source");
-                                }
-                            },
-                            notify::EventKind::Remove(_) |
-                            notify::EventKind::Modify(ModifyKind::Name(RenameMode::From)) => {
-                                warn!(path = ?cb_file_path, "lump file source removed, falling back to empty source");
-                                cb_state.clear();
-                            },
-                            _ => {}
-                        }
-                    }
-                }
-            },
-        )?;
-        file_watcher.watch(path, notify::RecursiveMode::NonRecursive)?;
+        let lump_file = LumpFileType::read(path).await?;
+        let inner = Arc::new(smol::lock::RwLock::new(lump_file));
+        let watcher = ResourceWatcher::new(inner.clone());
 
         Ok(Self {
-            file_path,
-            file_watcher,
-            state,
+            path: path.to_path_buf(),
+            inner,
+            watcher,
         })
+    }
+
+    fn set_lump_file(&self, new_lump_file: LumpFileType) {
+        let mut inner = self.inner.write_blocking();
+        let diff = new_lump_file.diff_hashes(&inner, &self.watcher);
+        self.watcher.notify_update(diff.into());
+        *inner = new_lump_file;
+    }
+}
+
+impl ResourceSourceFile for LumpFile {
+    #[inline]
+    fn path(&self) -> &Path {
+        &self.path
+    }
+
+    fn reload(&self) {
+        let result = future::block_on(LumpFileType::read(&self.path));
+        let new_lump_file = match result {
+            Ok(new_lump_file) => {
+                debug!(
+                    path = ?self.path, lump_count = ?new_lump_file.hashes().len(),
+                    "Reloaded lump file source"
+                );
+                new_lump_file
+            },
+            Err(error) => {
+                error!(path = ?self.path, ?error, "Failed to reload lump file source");
+                LumpFileType::None
+            }
+        };
+
+        self.set_lump_file(new_lump_file);
+    }
+
+    fn invalidate(&self) {
+        self.set_lump_file(LumpFileType::None);
     }
 }
 
 #[async_trait]
-impl ResourceSource for LumpFileSource {
+impl ResourceSource for LumpFile {
+    #[inline]
     fn hash(&self, id: &ResourceId) -> Option<ResourceDataSource> {
-        let lump_file = self.state.lump_file.read();
-        lump_file.hash(id).map(|s| ResourceDataSource::new(s.clone()))
+        self.inner.read_blocking().hash(id).map(|h| ResourceDataSource::new(h.clone()))
     }
 
+    #[inline]
     async fn load(&self, id: &ResourceId) -> ResourceDataResult {
-        let lump_file = self.state.lump_file.read();
-        let lump = lump_file.load_lump(&self.file_path, id).await?;
-        trace!(path = ?self.file_path, %id, "Loading lump");
-        Ok(lump.into())
+        Ok(self.inner.read().await.load_lump(&self.path, id).await?.into())
     }
 
-    fn watch(&self, id: ResourceId, watcher: Box<dyn ResourceWatcher>, _sub_idx: Option<SourceIndex>) {
-        self.state.watchers.write().insert(id, watcher);
+    fn watcher(&self) -> &ResourceWatcher {
+        &self.watcher
     }
+}
 
-    fn unwatch(&self, id: &ResourceId) {
-        self.state.watchers.write().remove(id);
+#[derive(Educe)]
+#[educe(Debug)]
+pub struct ListSourcesCommand {
+    #[educe(Debug(ignore))]
+    lump_files: ResourceSourceFilesHandle<LumpFile>,
+}
+
+impl ListSourcesCommand {
+    #[inline]
+    pub fn new(lump_files: ResourceSourceFilesHandle<LumpFile>) -> Self {
+        Self {
+            lump_files,
+        }
+    }
+}
+
+impl Command for ListSourcesCommand {
+    fn handle(&self, parameters: &[String]) -> Result<(), CommandError> {
+        ParamCountCheck::Equal(0).check(parameters.len() as u32)?;
+
+        info!("Lump Sources:");
+        for (idx, lump_file) in self.lump_files.read().iter().enumerate() {
+            info!("{idx}: {:?}", lump_file.path());
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Educe)]
+#[educe(Debug)]
+pub struct MoveSourceCommand {
+    #[educe(Debug(ignore))]
+    lump_files: ResourceSourceFilesHandle<LumpFile>,
+}
+
+impl MoveSourceCommand {
+    #[inline]
+    pub fn new(lump_files: ResourceSourceFilesHandle<LumpFile>) -> Self {
+        Self {
+            lump_files,
+        }
+    }
+}
+
+impl Command for MoveSourceCommand {
+    fn handle(&self, parameters: &[String]) -> Result<(), CommandError> {
+        ParamCountCheck::Equal(2).check(parameters.len() as u32)?;
+
+        let src_idx = parameters[0].parse::<usize>()
+            .map_err(|_| CommandError::InvalidParameter(parameters[0].clone()))?;
+        let dst_idx = parameters[1].parse::<usize>()
+            .map_err(|_| CommandError::InvalidParameter(parameters[1].clone()))?;
+
+        let mut lump_files = self.lump_files.write();
+        let len = lump_files.len();
+        if src_idx >= len {
+            return Err(CommandError::InvalidParameter(format!("{src_idx} must be < {len}")))
+        }
+        if dst_idx >= len {
+            return Err(CommandError::InvalidParameter(format!("{dst_idx} must be < {len}")))
+        }
+
+        let source = lump_files.remove(src_idx);
+        lump_files.insert(dst_idx, source);
+        info!("Moved {src_idx} => {dst_idx}");
+
+        Ok(())
+    }
+}
+
+#[derive(Educe)]
+#[educe(Debug)]
+pub struct AddSourceCommand {
+    #[educe(Debug(ignore))]
+    lump_files: ResourceSourceFilesHandle<LumpFile>,
+}
+
+impl AddSourceCommand {
+    #[inline]
+    pub fn new(lump_files: ResourceSourceFilesHandle<LumpFile>) -> Self {
+        Self {
+            lump_files,
+        }
+    }
+}
+
+impl Command for AddSourceCommand {
+    fn handle(&self, parameters: &[String]) -> Result<(), CommandError> {
+        ParamCountCheck::Range { min: 1, max: 2 }.check(parameters.len() as u32)?;
+
+        let (idx, path) = match parameters.len() {
+            1 => (None, PathBuf::from(&parameters[0])),
+            2 => {
+                let idx = parameters[0].parse::<usize>()
+                    .map_err(|_| CommandError::InvalidParameter(parameters[0].clone()))?;
+                (Some(idx), PathBuf::from(&parameters[1]))
+            },
+            _ => unreachable!(),
+        };
+
+        let lump_file = future::block_on(LumpFile::open(path))
+            .map_err(|error| CommandError::CommandFailure(Box::new(error)))?;
+
+        match idx {
+            Some(idx) => {
+                let mut lump_files = self.lump_files.write();
+                let len = lump_files.len();
+                if idx > len {
+                    return Err(CommandError::InvalidParameter(format!("{idx} must be < {len}")))
+                }
+                let path = lump_file.path.clone();
+                lump_files.insert(idx, lump_file);
+                info!("Added {idx}: {path:?}");
+            },
+            None => {
+                let path = lump_file.path.clone();
+                self.lump_files.write().push(lump_file);
+                info!("Added {path:?}");
+            },
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Educe)]
+#[educe(Debug)]
+pub struct RemoveSourceCommand {
+    #[educe(Debug(ignore))]
+    lump_files: ResourceSourceFilesHandle<LumpFile>,
+}
+
+impl RemoveSourceCommand {
+    #[inline]
+    pub fn new(lump_files: ResourceSourceFilesHandle<LumpFile>) -> Self {
+        Self {
+            lump_files,
+        }
+    }
+}
+
+impl Command for RemoveSourceCommand {
+    fn handle(&self, parameters: &[String]) -> Result<(), CommandError> {
+        ParamCountCheck::Equal(1).check(parameters.len() as u32)?;
+
+        let idx = parameters[0].parse::<usize>()
+            .map_err(|_| CommandError::InvalidParameter(parameters[0].clone()))?;
+
+        let mut lump_files = self.lump_files.write();
+        let len = lump_files.len();
+        if idx > len {
+            return Err(CommandError::InvalidParameter(format!("{idx} must be < {len}")))
+        }
+
+        let source = lump_files.remove(idx);
+        info!("Removed {idx}: {:?}", source.path);
+
+        Ok(())
     }
 }
 
 pub struct MarkerLump {}
 
-impl MarkerLump {
-    #[inline]
-    pub fn loader() -> MarkerLumpLoader {
-        MarkerLumpLoader {}
+impl ResourceDefaultLoader for MarkerLump {
+    type Loader = MarkerLumpLoader;
+
+    fn default_loader() -> Self::Loader {
+        MarkerLumpLoader(())
     }
 }
 
-pub struct MarkerLumpLoader {}
+pub struct MarkerLumpLoader(());
 
 #[async_trait]
 impl ResourceLoader<MarkerLump> for MarkerLumpLoader {
     async fn load(
         &self,
         _data: ResourceReadData,
-        _ctx: ResourceLoadContext,
+        _ctx: &ResourceLoadContext,
     ) -> Result<Box<MarkerLump>, ResourceLoadError> {
         // Marker lumps don't actually have data
         Ok(Box::new(MarkerLump {}))

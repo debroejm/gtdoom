@@ -2,7 +2,8 @@ use ahash::{HashMap, HashMapExt};
 use async_trait::async_trait;
 use gtether::render::image::VKImageViewSource;
 use gtether::render::Renderer;
-use gtether::resource::{ResourceLoadContext, ResourceLoadError, ResourceLoader, ResourceReadData};
+use gtether::resource::manager::ResourceLoadContext;
+use gtether::resource::{ResourceDefaultLoader, ResourceLoadError, ResourceLoader, ResourceReadData};
 use image::{DynamicImage, ImageReader, Rgba, RgbaImage};
 use smol::io::{AsyncRead, AsyncReadExt};
 use std::io;
@@ -137,22 +138,23 @@ pub struct Patch {
     pub offset: glm::TVec2<i16>,
 }
 
-impl Patch {
-    #[inline]
-    pub fn loader() -> PatchLoader {
-        PatchLoader::default()
+impl ResourceDefaultLoader for Patch {
+    type Loader = PatchLoader;
+
+    fn default_loader() -> Self::Loader {
+        PatchLoader(())
     }
 }
 
 #[derive(Debug, Default, Clone, Copy)]
-pub struct PatchLoader {}
+pub struct PatchLoader(());
 
 #[async_trait]
 impl ResourceLoader<Patch> for PatchLoader {
     async fn load(
         &self,
         mut data: ResourceReadData,
-        ctx: ResourceLoadContext,
+        ctx: &ResourceLoadContext,
     ) -> Result<Box<Patch>, ResourceLoadError> {
         let mut raw = Vec::new();
         data.read_to_end(&mut raw).await?;
@@ -168,11 +170,7 @@ impl ResourceLoader<Patch> for PatchLoader {
                 offset: glm::vec2(0, 0),
             }))
         } else {
-            let palettes_fut = ctx.manager().get_or_load(
-                "PLAYPAL",
-                Palettes::LOADER,
-                ctx.priority(),
-            );
+            let palettes_fut = ctx.get::<Palettes>("PLAYPAL");
 
             let patch = PalettedPatch::load(&raw)?;
             let palettes = palettes_fut.await?;
@@ -211,9 +209,9 @@ impl ResourceLoader<dyn VKImageViewSource> for PatchViewLoader {
     async fn load(
         &self,
         data: ResourceReadData,
-        ctx: ResourceLoadContext,
+        ctx: &ResourceLoadContext,
     ) -> Result<Box<dyn VKImageViewSource>, ResourceLoadError> {
-        let patch = Patch::loader().load(
+        let patch = Patch::default_loader().load(
             data,
             ctx
         ).await?;
@@ -230,11 +228,6 @@ impl ResourceLoader<dyn VKImageViewSource> for PatchViewLoader {
 pub struct PNames(Vec<String>);
 
 impl PNames {
-    #[inline]
-    pub fn loader() -> PNamesLoader {
-        PNamesLoader::default()
-    }
-
     #[inline]
     pub fn get(&self, idx: usize) -> Option<&str> {
         self.0.get(idx).map(AsRef::as_ref)
@@ -258,15 +251,23 @@ impl PNames {
     }
 }
 
+impl ResourceDefaultLoader for PNames {
+    type Loader = PNamesLoader;
+
+    fn default_loader() -> Self::Loader {
+        PNamesLoader(())
+    }
+}
+
 #[derive(Default, Clone, Copy)]
-pub struct PNamesLoader {}
+pub struct PNamesLoader(());
 
 #[async_trait]
 impl ResourceLoader<PNames> for PNamesLoader {
     async fn load(
         &self,
         data: ResourceReadData,
-        _ctx: ResourceLoadContext,
+        _ctx: &ResourceLoadContext,
     ) -> Result<Box<PNames>, ResourceLoadError> {
         Ok(Box::new(PNames::read(data).await?))
     }

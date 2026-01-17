@@ -1,5 +1,6 @@
 use async_trait::async_trait;
-use gtether::resource::{ResourceLoadContext, ResourceLoadError, ResourceLoader, ResourceReadData};
+use gtether::resource::manager::ResourceLoadContext;
+use gtether::resource::{ResourceLoadError, ResourceLoader, ResourceReadData};
 use i_triangle::i_overlay::i_float::float::compatible::FloatPointCompatible;
 use smol::io::{AsyncRead, AsyncReadExt};
 use std::ops::Deref;
@@ -120,7 +121,7 @@ impl ResourceLoader<Vertices> for VerticesLumpLoader {
     async fn load(
         &self,
         data: ResourceReadData,
-        _ctx: ResourceLoadContext,
+        _ctx: &ResourceLoadContext,
     ) -> Result<Box<Vertices>, ResourceLoadError> {
         Ok(Box::new(Vertices::read(data).await?))
     }

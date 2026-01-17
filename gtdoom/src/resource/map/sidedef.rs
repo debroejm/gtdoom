@@ -1,9 +1,10 @@
 use async_trait::async_trait;
 use gtether::render::Renderer;
-use gtether::resource::id::ResourceId;
-use gtether::resource::{Resource, ResourceLoadContext, ResourceLoadError, ResourceLoader, ResourceReadData};
+use gtether::resource::manager::ResourceLoadContext;
+use gtether::resource::{Resource, ResourceLoadError, ResourceLoader, ResourceReadData};
 use smol::io::AsyncReadExt;
 use std::ops::Deref;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::debug;
 
@@ -98,19 +99,17 @@ impl Sidedef {
         }
 
         // Prefer wall textures first
-        let result = ctx.manager().get_or_load(
-            ResourceId::from("Textures").join(name),
+        let result = ctx.get_with_loader(
+            PathBuf::from("Textures").join(name),
             Texture::loader(renderer.clone()),
-            ctx.priority(),
         ).await;
 
         match result {
             Ok(flat) => Ok(Some(flat)),
             Err(ResourceLoadError::NotFound(_)) => {
-                let tex = ctx.manager().get_or_load(
-                    ResourceId::from("Flats").join(name),
+                let tex = ctx.get_with_loader(
+                    PathBuf::from("Flats").join(name),
                     Texture::flat_loader(renderer.clone()),
-                    ctx.priority(),
                 ).await?;
                 Ok(Some(tex))
             },
@@ -224,12 +223,11 @@ impl ResourceLoader<Sidedefs> for SidedefsLumpLoader {
     async fn load(
         &self,
         mut data: ResourceReadData,
-        ctx: ResourceLoadContext,
+        ctx: &ResourceLoadContext,
     ) -> Result<Box<Sidedefs>, ResourceLoadError> {
-        let sectors = ctx.manager().get_or_load(
-            ctx.id().parent().join("SECTORS"),
+        let sectors = ctx.get_with_loader(
+            PathBuf::from(ctx.id().as_str()).parent().unwrap().join("SECTORS"),
             Sectors::lump_loader(self.renderer.clone(), self.map_type),
-            ctx.priority(),
         ).await?;
 
         let mut sidedefs = Vec::new();
@@ -243,7 +241,7 @@ impl ResourceLoader<Sidedefs> for SidedefsLumpLoader {
                         &bytes,
                         &sectors_lock,
                         &self.renderer,
-                        &ctx,
+                        ctx,
                     ).await?)),
                     Err(error) => match error.kind() {
                         std::io::ErrorKind::UnexpectedEof => break,

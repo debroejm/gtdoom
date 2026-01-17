@@ -2,10 +2,11 @@ use async_trait::async_trait;
 use bitflags::bitflags;
 use gtether::render::image::VKImageViewSource;
 use gtether::render::Renderer;
-use gtether::resource::id::ResourceId;
-use gtether::resource::{ResourceLoadContext, ResourceLoadError, ResourceLoader, ResourceReadData};
+use gtether::resource::manager::ResourceLoadContext;
+use gtether::resource::{ResourceDefaultLoader, ResourceLoadError, ResourceLoader, ResourceReadData};
 use image::{DynamicImage, GenericImage, GenericImageView};
 use smol::io::AsyncReadExt;
+use std::path::PathBuf;
 use std::sync::Arc;
 use vulkano::image::view::ImageView;
 
@@ -83,7 +84,7 @@ impl ResourceLoader<Texture> for TextureLoader {
     async fn load(
         &self,
         mut data: ResourceReadData,
-        ctx: ResourceLoadContext,
+        ctx: &ResourceLoadContext,
     ) -> Result<Box<Texture>, ResourceLoadError> {
         let mut header = [0; 1];
         data.read_exact(&mut header).await?;
@@ -95,11 +96,7 @@ impl ResourceLoader<Texture> for TextureLoader {
         match format {
             TextureFormat::Doom => {
                 // Start loading pnames in the background
-                let pnames_fut = ctx.manager().get_or_load(
-                    "PNAMES",
-                    PNames::loader(),
-                    ctx.priority(),
-                );
+                let pnames_fut = ctx.get::<PNames>("PNAMES");
 
                 let mut buf = [0; 10];
                 data.read_exact(&mut buf).await?;
@@ -160,20 +157,14 @@ impl ResourceLoader<Texture> for TextureLoader {
                             format!("No patch found for idx: {}", patch_info.idx)
                         ))?;
                     // Try the patches namespace first
-                    let result = ctx.manager().get_or_load(
-                        ResourceId::from("Patches").join(patch_name),
-                        Patch::loader(),
-                        ctx.priority(),
+                    let result = ctx.get::<Patch>(
+                        PathBuf::from("Patches").join(patch_name),
                     ).await;
                     let patch_res = match result {
                         Ok(patch) => patch,
                         Err(ResourceLoadError::NotFound(_)) => {
                             // If not found, try the global namespace
-                            ctx.manager().get_or_load(
-                                patch_name,
-                                Patch::loader(),
-                                ctx.priority(),
-                            ).await?
+                            ctx.get::<Patch>(patch_name).await?
                         },
                         Err(e) => return Err(e),
                     };
@@ -233,9 +224,9 @@ impl ResourceLoader<Texture> for FlatTextureLoader {
     async fn load(
         &self,
         data: ResourceReadData,
-        ctx: ResourceLoadContext
+        ctx: &ResourceLoadContext
     ) -> Result<Box<Texture>, ResourceLoadError> {
-        let flat = Flat::loader().load(
+        let flat = Flat::default_loader().load(
             data,
             ctx,
         ).await?;

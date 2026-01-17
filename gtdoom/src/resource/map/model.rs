@@ -967,22 +967,22 @@ impl EngineRenderHandler for MapRenderer {
     fn build_commands(
         &self,
         builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
-    ) -> Result<(), Validated<VulkanoError>> {
+    ) -> Result<(), VulkanoError> {
         let graphics = self.graphics.vk_graphics();
 
         builder
-            .bind_pipeline_graphics(graphics.clone())?
+            .bind_pipeline_graphics(graphics.clone()).unwrap()
             .bind_descriptor_sets(
                 PipelineBindPoint::Graphics,
                 graphics.layout().clone(),
                 0,
-                self.descriptor_set_0.descriptor_set().map_err(VulkanoError::from_validated)?,
+                self.descriptor_set_0.descriptor_set().map_err(Validated::unwrap)?,
             ).unwrap()
             .bind_descriptor_sets(
                 PipelineBindPoint::Graphics,
                 graphics.layout().clone(),
                 1,
-                self.descriptor_set_1.descriptor_set().map_err(VulkanoError::from_validated)?,
+                self.descriptor_set_1.descriptor_set().map_err(Validated::unwrap)?,
             ).unwrap()
             .bind_vertex_buffers(0, self.vertex_buffer.clone()).unwrap()
             .bind_index_buffer(self.index_buffer.clone()).unwrap();

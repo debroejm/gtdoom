@@ -1,5 +1,6 @@
 use async_trait::async_trait;
-use gtether::resource::{ResourceLoadContext, ResourceLoadError, ResourceLoader, ResourceReadData};
+use gtether::resource::manager::ResourceLoadContext;
+use gtether::resource::{ResourceDefaultLoader, ResourceLoadError, ResourceLoader, ResourceReadData};
 use image::{ImageBuffer, ImageReader, Rgba, RgbaImage};
 use smol::io::AsyncReadExt;
 use std::io::Cursor;
@@ -42,22 +43,23 @@ pub struct Flat {
     pub image: RgbaImage,
 }
 
-impl Flat {
-    #[inline]
-    pub fn loader() -> FlatLoader {
-        FlatLoader::default()
+impl ResourceDefaultLoader for Flat {
+    type Loader = FlatLoader;
+
+    fn default_loader() -> Self::Loader {
+        FlatLoader(())
     }
 }
 
 #[derive(Debug, Default, Clone, Copy)]
-pub struct FlatLoader {}
+pub struct FlatLoader(());
 
 #[async_trait]
 impl ResourceLoader<Flat> for FlatLoader {
     async fn load(
         &self,
         mut data: ResourceReadData,
-        ctx: ResourceLoadContext,
+        ctx: &ResourceLoadContext,
     ) -> Result<Box<Flat>, ResourceLoadError> {
         let mut raw = Vec::new();
         data.read_to_end(&mut raw).await?;
@@ -72,11 +74,7 @@ impl ResourceLoader<Flat> for FlatLoader {
                 image,
             }))
         } else {
-            let palettes_fut = ctx.manager().get_or_load(
-                "PLAYPAL",
-                Palettes::LOADER,
-                ctx.priority(),
-            );
+            let palettes_fut = ctx.get::<Palettes>("PLAYPAL");
 
             let flat = PalettedFlat::load(&raw)?;
             let palettes = palettes_fut.await?;

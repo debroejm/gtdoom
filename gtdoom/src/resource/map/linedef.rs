@@ -1,9 +1,11 @@
 use async_trait::async_trait;
 use bitflags::bitflags;
 use gtether::render::Renderer;
-use gtether::resource::{Resource, ResourceLoadContext, ResourceLoadError, ResourceLoader, ResourceReadData};
+use gtether::resource::manager::ResourceLoadContext;
+use gtether::resource::{Resource, ResourceLoadError, ResourceLoader, ResourceReadData};
 use smol::io::{AsyncRead, AsyncReadExt};
 use std::ops::Deref;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::debug;
 
@@ -438,17 +440,15 @@ impl ResourceLoader<Linedefs> for LinedefsLumpLoader {
     async fn load(
         &self,
         data: ResourceReadData,
-        ctx: ResourceLoadContext,
+        ctx: &ResourceLoadContext,
     ) -> Result<Box<Linedefs>, ResourceLoadError> {
-        let vertices_fut = ctx.manager().get_or_load(
-            ctx.id().parent().join("VERTEXES"),
+        let vertices_fut = ctx.get_with_loader(
+            PathBuf::from(ctx.id().as_str()).parent().unwrap().join("VERTEXES"),
             Vertices::lump_loader(),
-            ctx.priority(),
         );
-        let sidedefs_fut = ctx.manager().get_or_load(
-            ctx.id().parent().join("SIDEDEFS"),
+        let sidedefs_fut = ctx.get_with_loader(
+            PathBuf::from(ctx.id().as_str()).parent().unwrap().join("SIDEDEFS"),
             Sidedefs::lump_loader(self.renderer.clone(), self.map_type),
-            ctx.priority(),
         );
         Ok(Box::new(Linedefs::read(
             data,

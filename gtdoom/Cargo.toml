@@ -15,8 +15,6 @@ gtether = { workspace = true }
 image = { workspace = true }
 i_triangle = { workspace = true }
 nalgebra-glm = { workspace = true }
-notify = { workspace = true }
-notify-debouncer-full = { workspace = true }
 parking_lot = { workspace = true }
 parry2d = { workspace = true }
 parry3d = { workspace = true }
