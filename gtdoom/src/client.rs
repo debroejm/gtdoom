@@ -14,6 +14,7 @@ use gtether::render::uniform::Uniform;
 use gtether::resource::manager::ResourceManager;
 use gtether::resource::source::fs::ResourceSourceFilesHandle;
 use gtether::util::tick_loop::{TickLoopBuilder, TickLoopHandle};
+use gtether::worker::WorkerPool;
 use gtether::Engine;
 use parking_lot::Mutex;
 use parry3d::na::{Isometry3, Point3, Translation3};
@@ -30,6 +31,7 @@ use crate::resource::lump::{AddSourceCommand, ListSourcesCommand, LumpFile, Move
 use crate::resource::map::model::{Chunk, MapModelData, MapRenderer};
 use crate::resource::map::Map;
 use crate::resource::patch::PatchViewLoader;
+use crate::WorkerPriority;
 
 #[derive(Educe)]
 #[educe(Debug)]
@@ -110,9 +112,13 @@ pub struct GtdoomClient {
 }
 
 impl GtdoomClient {
-    pub fn new(lump_files: ResourceSourceFilesHandle<LumpFile>) -> Self {
+    pub fn new(
+        workers: &WorkerPool<WorkerPriority>,
+        lump_files: ResourceSourceFilesHandle<LumpFile>,
+    ) -> Self {
         let console = Arc::new(Console::builder()
             .log(ConsoleLog::new(1000))
+            .worker_config(WorkerPriority::Secondary, workers)
             .build());
 
         Self {

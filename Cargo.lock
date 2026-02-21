@@ -1317,14 +1317,15 @@ dependencies = [
 
 [[package]]
 name = "gtether"
-version = "0.2.0"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a0024eb6a96a06a4bff0c13cccde1d0ce34972b504888ecf52d90f51efe83058"
+checksum = "4b00cc4f71b79ea930579b79691fd0b4bf6447f0ce28db6feaab5ef98b18608b"
 dependencies = [
  "ab_glyph",
  "ahash",
  "aquamarine",
  "arrayvec",
+ "async-task",
  "async-trait",
  "base64",
  "bimap",
@@ -1347,13 +1348,17 @@ dependencies = [
  "ouroboros",
  "papaya",
  "parking_lot",
+ "pin-project",
+ "pin-project-lite",
  "ringbuf",
  "sha2",
  "shlex",
+ "slab",
  "smallvec",
  "smol",
  "strum 0.26.3",
  "thiserror 2.0.17",
+ "thread_local",
  "tobj",
  "tracing",
  "tracing-subscriber",
@@ -1365,9 +1370,9 @@ dependencies = [
 
 [[package]]
 name = "gtether_derive"
-version = "0.2.0"
+version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a13ff29a5a825657636fddf8b0e6ac287d9eec73dba0197b2b40e8bd0628f9d6"
+checksum = "0f32a2b9f3780f5d37e6a5ad2d5a2cf12c336fa7ea2f1219a2494188e8d5de8e"
 dependencies = [
  "proc-macro-crate 3.4.0",
  "proc-macro2",

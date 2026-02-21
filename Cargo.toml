@@ -15,7 +15,7 @@ base64 = "0.22"
 bitflags = "2.9"
 chrono = "0.4"
 educe = "0.6"
-gtether = { version = "0.2", features = ["gui"] }
+gtether = { version = "0.2.2", features = ["gui"] }
 image = "0.25"
 i_triangle = "0.36"
 nalgebra-glm = { version = "0.19", features = ["convert-bytemuck"] }
