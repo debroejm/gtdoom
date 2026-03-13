@@ -405,6 +405,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "az"
+version = "1.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "be5eb007b7cacc6c660343e96f650fedf4b5a77512399eb952ca6642cf8d13f7"
+
+[[package]]
 name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -722,6 +728,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4ca0197aee26d1ae37445ee532fefce43251d24cc7c166799f4d46817f1d3973"
 dependencies = [
  "crossbeam-utils",
+]
+
+[[package]]
+name = "cordic"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ed0a176c0b8c5c95fa0523177530364c5b68a8895d9745730dbfa692a7412d0"
+dependencies = [
+ "fixed",
 ]
 
 [[package]]
@@ -1093,6 +1108,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8591b0bcc8a98a64310a2fae1bb3e9b8564dd10e381e6e28010fde8e8e8568db"
 
 [[package]]
+name = "fixed"
+version = "1.30.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c566da967934c6c7ee0458a9773de9b2a685bd2ce26a3b28ddfc740e640182f5"
+dependencies = [
+ "az",
+ "bytemuck",
+ "half",
+ "typenum",
+]
+
+[[package]]
 name = "flagset"
 version = "0.4.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1294,11 +1321,14 @@ dependencies = [
  "base64",
  "bitflags 2.10.0",
  "chrono",
+ "cordic",
  "educe",
+ "fixed",
  "gtether",
  "i_triangle",
  "image",
  "nalgebra-glm",
+ "num-traits",
  "parking_lot",
  "parry2d",
  "parry3d",
@@ -1317,9 +1347,9 @@ dependencies = [
 
 [[package]]
 name = "gtether"
-version = "0.2.2"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4b00cc4f71b79ea930579b79691fd0b4bf6447f0ce28db6feaab5ef98b18608b"
+checksum = "259072f234508fd7b44e566a2591289af325b240f7b41883ea82434c8d777325"
 dependencies = [
  "ab_glyph",
  "ahash",
@@ -1370,9 +1400,9 @@ dependencies = [
 
 [[package]]
 name = "gtether_derive"
-version = "0.2.2"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0f32a2b9f3780f5d37e6a5ad2d5a2cf12c336fa7ea2f1219a2494188e8d5de8e"
+checksum = "d5df624b38c6f82ed7adb691358c9536929515eb147f79d2a809a25bd38d9a52"
 dependencies = [
  "proc-macro-crate 3.4.0",
  "proc-macro2",

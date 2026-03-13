@@ -48,7 +48,9 @@ impl ResourceDefaultLoader for Palettes {
 pub struct PaletteLoader(());
 
 #[async_trait]
-impl ResourceLoader<Palettes> for PaletteLoader {
+impl ResourceLoader for PaletteLoader {
+    type Output = Palettes;
+
     async fn load(
         &self,
         mut data: ResourceReadData,

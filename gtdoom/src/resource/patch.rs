@@ -150,7 +150,9 @@ impl ResourceDefaultLoader for Patch {
 pub struct PatchLoader(());
 
 #[async_trait]
-impl ResourceLoader<Patch> for PatchLoader {
+impl ResourceLoader for PatchLoader {
+    type Output = Patch;
+
     async fn load(
         &self,
         mut data: ResourceReadData,
@@ -205,7 +207,9 @@ impl PatchViewLoader {
 }
 
 #[async_trait]
-impl ResourceLoader<dyn VKImageViewSource> for PatchViewLoader {
+impl ResourceLoader for PatchViewLoader {
+    type Output = dyn VKImageViewSource;
+
     async fn load(
         &self,
         data: ResourceReadData,
@@ -263,7 +267,9 @@ impl ResourceDefaultLoader for PNames {
 pub struct PNamesLoader(());
 
 #[async_trait]
-impl ResourceLoader<PNames> for PNamesLoader {
+impl ResourceLoader for PNamesLoader {
+    type Output = PNames;
+
     async fn load(
         &self,
         data: ResourceReadData,

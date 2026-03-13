@@ -59,7 +59,7 @@ impl Command for ChangeMapCommand {
         let (chunk, map_model_data) = {
             let mut builder = Chunk::builder();
             for linedef in map.read().linedefs().read().iter() {
-                builder.add_linedef(linedef);
+                builder.add_linedef(&linedef);
             }
             let mut map_model_data = MapModelData::default();
             let chunk = Arc::new(builder.build(&mut map_model_data).unwrap());

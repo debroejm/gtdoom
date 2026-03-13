@@ -1,15 +1,16 @@
 use async_trait::async_trait;
 use bitflags::bitflags;
+use educe::Educe;
 use gtether::render::Renderer;
 use gtether::resource::manager::ResourceLoadContext;
 use gtether::resource::{Resource, ResourceLoadError, ResourceLoader, ResourceReadData};
 use smol::io::AsyncReadExt;
-use std::ops::Deref;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::debug;
 
+use crate::resource::indexed::IndexedVec;
 use crate::resource::map::MapType;
 use crate::resource::string_from_bytes_until_nul_checked;
 use crate::resource::texture::Texture;
@@ -513,16 +514,9 @@ impl Sector {
     }
 }
 
-pub struct Sectors(Vec<Arc<Sector>>);
-
-impl Deref for Sectors {
-    type Target = Vec<Arc<Sector>>;
-
-    #[inline]
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
+#[derive(Educe)]
+#[educe(Deref)]
+pub struct Sectors(IndexedVec<Sector>);
 
 impl Sectors {
     #[inline]
@@ -540,7 +534,9 @@ pub struct SectorsLumpLoader {
 }
 
 #[async_trait]
-impl ResourceLoader<Sectors> for SectorsLumpLoader {
+impl ResourceLoader for SectorsLumpLoader {
+    type Output = Sectors;
+
     async fn load(
         &self,
         mut data: ResourceReadData,
@@ -550,13 +546,13 @@ impl ResourceLoader<Sectors> for SectorsLumpLoader {
         let mut sectors = Vec::new();
         loop {
             match data.read_exact(&mut bytes).await {
-                Ok(()) => sectors.push(Arc::new(Sector::load(
+                Ok(()) => sectors.push(Sector::load(
                     sectors.len(),
                     &bytes,
                     self.map_type,
                     &self.renderer,
                     ctx,
-                ).await?)),
+                ).await?),
                 Err(error) => match error.kind() {
                     std::io::ErrorKind::UnexpectedEof => break,
                     _ => return Err(ResourceLoadError::from_error(error)),
@@ -564,6 +560,6 @@ impl ResourceLoader<Sectors> for SectorsLumpLoader {
             }
         }
         debug!(count = ?sectors.len(), "Loaded Sectors");
-        Ok(Box::new(Sectors(sectors)))
+        Ok(Box::new(Sectors(sectors.into())))
     }
 }

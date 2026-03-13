@@ -14,11 +14,14 @@ async_zip = { version = "0.0.17", features = ["deflate", "bzip2", "lzma"] }
 base64 = "0.22"
 bitflags = "2.9"
 chrono = "0.4"
+cordic = "0.1.5"
 educe = "0.6"
-gtether = { version = "0.2.2", features = ["gui"] }
+fixed = "1.30"
+gtether = { version = "0.2.3", features = ["gui"] }
 image = "0.25"
 i_triangle = "0.36"
 nalgebra-glm = { version = "0.19", features = ["convert-bytemuck"] }
+num-traits = "0.2.19"
 parking_lot = "0.12"
 parry2d = "0.22"
 parry3d = "0.22"

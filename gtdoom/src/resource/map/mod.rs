@@ -1,3 +1,4 @@
+pub mod gl_node;
 pub mod linedef;
 pub mod model;
 pub mod quadtree;
@@ -11,12 +12,14 @@ use gtether::render::Renderer;
 use gtether::resource::manager::ResourceLoadContext;
 use gtether::resource::{Resource, ResourceLoadError, ResourceLoader, ResourceReadData};
 use std::fmt;
-use std::fmt::Formatter;
+use std::fmt::{Debug, Formatter};
 use std::ops::Deref;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::resource::indexed::IndexedVec;
 use crate::resource::lump::MarkerLump;
+use crate::resource::map::gl_node::GlNodes;
 use crate::resource::map::linedef::Linedefs;
 use crate::resource::map::sector::Sectors;
 use crate::resource::map::sidedef::Sidedefs;
@@ -45,19 +48,34 @@ fn fmt_resource_vec<T, D: Deref<Target=Vec<T>> + ?Sized + Send + Sync + 'static>
     write!(f, "[..; {}]", resource.read().deref().len())
 }
 
+fn fmt_resource_buffer<T, D: Deref<Target=IndexedVec<T>> + ?Sized + Send + Sync + 'static>(
+    resource: &Arc<Resource<D>>,
+    f: &mut Formatter<'_>,
+) -> fmt::Result {
+    write!(f, "[.., {}]", resource.read().deref().len())
+}
+
+fn fmt_resource<T: ?Sized + Debug + Send + Sync + 'static>(
+    resource: &Arc<Resource<T>>,
+    f: &mut Formatter<'_>,
+) -> fmt::Result {
+    write!(f, "{:?}", &*resource.read())
+}
+
 #[derive(Educe)]
 #[educe(Debug)]
 pub struct Map {
     m_type: MapType,
     m_format: MapFormat,
-    #[educe(Debug(method(fmt_resource_vec)))]
+    #[educe(Debug(method(fmt_resource_buffer)))]
     sectors: Arc<Resource<Sectors>>,
     #[educe(Debug(method(fmt_resource_vec)))]
     vertices: Arc<Resource<Vertices>>,
-    #[educe(Debug(method(fmt_resource_vec)))]
+    #[educe(Debug(method(fmt_resource_buffer)))]
     sidedefs: Arc<Resource<Sidedefs>>,
-    #[educe(Debug(method(fmt_resource_vec)))]
+    #[educe(Debug(method(fmt_resource_buffer)))]
     linedefs: Arc<Resource<Linedefs>>,
+    gl_nodes: Arc<Resource<GlNodes>>,
 }
 
 impl Map {
@@ -79,7 +97,9 @@ pub struct MapLoader {
 }
 
 #[async_trait]
-impl ResourceLoader<Map> for MapLoader {
+impl ResourceLoader for MapLoader {
+    type Output = Map;
+
     async fn load(
         &self,
         _data: ResourceReadData,
@@ -119,6 +139,10 @@ impl ResourceLoader<Map> for MapLoader {
                     PathBuf::from(ctx.id().as_str()).join("LINEDEFS"),
                     Linedefs::lump_loader(self.renderer.clone(), m_type, m_format),
                 );
+                let gl_nodes_fut = ctx.get_with_loader(
+                    PathBuf::from(ctx.id().as_str()).join("SSECTORS"),
+                    GlNodes::lump_loader(self.renderer.clone(), m_type, m_format),
+                ).or_loader_default();
 
                 Ok(Box::new(Map {
                     m_type,
@@ -127,6 +151,7 @@ impl ResourceLoader<Map> for MapLoader {
                     vertices: vertices_fut.await?,
                     sidedefs: sidedefs_fut.await?,
                     linedefs: linedefs_fut.await?,
+                    gl_nodes: gl_nodes_fut.await?,
                 }))
             },
             MapFormat::UDMF => Err(ResourceLoadError::from("UDMF map format not yet supported")),

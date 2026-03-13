@@ -32,6 +32,7 @@ use vulkano::render_pass::Subpass;
 use vulkano::Validated;
 
 use crate::render::camera::{Camera, VP};
+use crate::resource::indexed::IndexedArc;
 use crate::resource::map::linedef::{Linedef, LinedefFlags};
 use crate::resource::map::sector::Sector;
 use crate::resource::map::sidedef::{Sidedef, SidedefLocation};
@@ -344,13 +345,13 @@ impl NestedCompound {
 }
 
 struct SectorBuilder {
-    sector: Arc<Sector>,
+    sector: IndexedArc<Sector>,
     open_contours: Vec<Contour<FloatVertex>>,
     closed_shapes: Vec<NestedCompound>,
 }
 
 impl SectorBuilder {
-    fn new(sector: Arc<Sector>) -> Self {
+    fn new(sector: IndexedArc<Sector>) -> Self {
         Self {
             sector,
             open_contours: Vec::new(),

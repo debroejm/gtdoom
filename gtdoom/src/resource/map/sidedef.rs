@@ -1,13 +1,14 @@
 use async_trait::async_trait;
+use educe::Educe;
 use gtether::render::Renderer;
 use gtether::resource::manager::ResourceLoadContext;
 use gtether::resource::{Resource, ResourceLoadError, ResourceLoader, ResourceReadData};
 use smol::io::AsyncReadExt;
-use std::ops::Deref;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::debug;
 
+use crate::resource::indexed::{IndexedVec, IndexedArc};
 use crate::resource::map::sector::{Sector, Sectors};
 use crate::resource::map::MapType;
 use crate::resource::string_from_bytes_until_nul_checked;
@@ -77,12 +78,13 @@ impl Default for SidedefProperties {
     }
 }
 
+#[derive(Debug)]
 pub struct Sidedef {
     pub offset: glm::TVec2<i16>,
     pub upper_tex: Option<Arc<Resource<Texture>>>,
     pub lower_tex: Option<Arc<Resource<Texture>>>,
     pub middle_tex: Option<Arc<Resource<Texture>>>,
-    pub sector: Arc<Sector>,
+    pub sector: IndexedArc<Sector>,
     pub properties: SidedefProperties,
 }
 
@@ -139,7 +141,7 @@ impl Sidedef {
         let sector_idx = i16::from_le_bytes(bytes[28..30].try_into().unwrap()) as u16;
         let sector = sectors.get(sector_idx as usize)
             .ok_or(SidedefLoadError::MissingSector(sector_idx))?
-            .clone();
+            .to_arc();
         let properties = SidedefProperties::default();
         Ok(Self {
             offset,
@@ -189,18 +191,12 @@ impl Sidedef {
     }
 }
 
+#[derive(Educe)]
+#[educe(Deref)]
 pub struct Sidedefs {
-    inner: Vec<Arc<Sidedef>>,
+    #[educe(Deref)]
+    inner: IndexedVec<Sidedef>,
     sectors: Arc<Resource<Sectors>>,
-}
-
-impl Deref for Sidedefs {
-    type Target = Vec<Arc<Sidedef>>;
-
-    #[inline]
-    fn deref(&self) -> &Self::Target {
-        &self.inner
-    }
 }
 
 impl Sidedefs {
@@ -219,7 +215,9 @@ pub struct SidedefsLumpLoader {
 }
 
 #[async_trait]
-impl ResourceLoader<Sidedefs> for SidedefsLumpLoader {
+impl ResourceLoader for SidedefsLumpLoader {
+    type Output = Sidedefs;
+
     async fn load(
         &self,
         mut data: ResourceReadData,
@@ -237,12 +235,12 @@ impl ResourceLoader<Sidedefs> for SidedefsLumpLoader {
             let mut bytes = [0; Sidedef::BYTE_COUNT];
             loop {
                 match data.read_exact(&mut bytes).await {
-                    Ok(()) => sidedefs.push(Arc::new(Sidedef::load(
+                    Ok(()) => sidedefs.push(Sidedef::load(
                         &bytes,
                         &sectors_lock,
                         &self.renderer,
                         ctx,
-                    ).await?)),
+                    ).await?),
                     Err(error) => match error.kind() {
                         std::io::ErrorKind::UnexpectedEof => break,
                         _ => return Err(error.into()),
@@ -253,7 +251,7 @@ impl ResourceLoader<Sidedefs> for SidedefsLumpLoader {
         debug!(count = ?sidedefs.len(), "Loaded Sidedefs");
 
         Ok(Box::new(Sidedefs {
-            inner: sidedefs,
+            inner: sidedefs.into(),
             sectors,
         }))
     }

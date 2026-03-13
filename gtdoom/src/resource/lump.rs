@@ -1036,7 +1036,9 @@ impl ResourceDefaultLoader for MarkerLump {
 pub struct MarkerLumpLoader(());
 
 #[async_trait]
-impl ResourceLoader<MarkerLump> for MarkerLumpLoader {
+impl ResourceLoader for MarkerLumpLoader {
+    type Output = MarkerLump;
+
     async fn load(
         &self,
         _data: ResourceReadData,

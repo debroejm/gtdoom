@@ -80,7 +80,9 @@ pub struct TextureLoader {
 }
 
 #[async_trait]
-impl ResourceLoader<Texture> for TextureLoader {
+impl ResourceLoader for TextureLoader {
+    type Output = Texture;
+
     async fn load(
         &self,
         mut data: ResourceReadData,
@@ -220,7 +222,9 @@ pub struct FlatTextureLoader {
 }
 
 #[async_trait]
-impl ResourceLoader<Texture> for FlatTextureLoader {
+impl ResourceLoader for FlatTextureLoader {
+    type Output = Texture;
+
     async fn load(
         &self,
         data: ResourceReadData,

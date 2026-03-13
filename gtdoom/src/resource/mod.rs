@@ -12,6 +12,7 @@ use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter};
 use vulkano::sync::GpuFuture;
 use vulkano::{DeviceSize, Validated, VulkanError};
 
+pub mod indexed;
 pub mod flat;
 pub mod lump;
 pub mod map;

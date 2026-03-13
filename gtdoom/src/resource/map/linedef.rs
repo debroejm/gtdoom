@@ -1,14 +1,16 @@
 use async_trait::async_trait;
 use bitflags::bitflags;
+use educe::Educe;
 use gtether::render::Renderer;
 use gtether::resource::manager::ResourceLoadContext;
 use gtether::resource::{Resource, ResourceLoadError, ResourceLoader, ResourceReadData};
 use smol::io::{AsyncRead, AsyncReadExt};
-use std::ops::Deref;
+use std::fmt::Debug;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::debug;
 
+use crate::resource::indexed::{IndexedVec, IndexedArc};
 use crate::resource::map::sidedef::{Sidedef, Sidedefs};
 use crate::resource::map::vertex::{Vertex, Vertices};
 use crate::resource::map::{MapFormat, MapType};
@@ -173,11 +175,12 @@ impl Default for LinedefProperties {
     }
 }
 
+#[derive(Debug)]
 pub struct Linedef {
     pub start_vertex: Vertex,
     pub end_vertex: Vertex,
-    pub front_sidedef: Option<Arc<Sidedef>>,
-    pub back_sidedef: Option<Arc<Sidedef>>,
+    pub front_sidedef: Option<IndexedArc<Sidedef>>,
+    pub back_sidedef: Option<IndexedArc<Sidedef>>,
     pub flags: LinedefFlags,
     pub props: LinedefProperties,
 }
@@ -247,7 +250,7 @@ impl Linedef {
             } else {
                 Some(sidedefs.get(idx as usize)
                     .ok_or(LinedefLoadError::MissingSidedef(idx))?
-                    .clone())
+                    .to_arc())
             }
         };
         let back_sidedef = {
@@ -257,7 +260,7 @@ impl Linedef {
             } else {
                 Some(sidedefs.get(idx as usize)
                     .ok_or(LinedefLoadError::MissingSidedef(idx))?
-                    .clone())
+                    .to_arc())
             }
         };
 
@@ -315,7 +318,7 @@ impl Linedef {
             } else {
                 Some(sidedefs.get(idx as usize)
                     .ok_or(LinedefLoadError::MissingSidedef(idx))?
-                    .clone())
+                    .to_arc())
             }
         };
         let back_sidedef = {
@@ -325,7 +328,7 @@ impl Linedef {
             } else {
                 Some(sidedefs.get(idx as usize)
                     .ok_or(LinedefLoadError::MissingSidedef(idx))?
-                    .clone())
+                    .to_arc())
             }
         };
 
@@ -340,19 +343,13 @@ impl Linedef {
     }
 }
 
+#[derive(Educe)]
+#[educe(Deref)]
 pub struct Linedefs {
-    inner: Vec<Arc<Linedef>>,
+    #[educe(Deref)]
+    linedefs: IndexedVec<Linedef>,
     vertices: Arc<Resource<Vertices>>,
     sidedefs: Arc<Resource<Sidedefs>>,
-}
-
-impl Deref for Linedefs {
-    type Target = Vec<Arc<Linedef>>;
-
-    #[inline]
-    fn deref(&self) -> &Self::Target {
-        &self.inner
-    }
 }
 
 impl Linedefs {
@@ -386,12 +383,12 @@ impl Linedefs {
                     let mut bytes = [0; Linedef::DOOM_BYTE_COUNT];
                     loop {
                         match reader.read_exact(&mut bytes).await {
-                            Ok(()) => linedefs.push(Arc::new(Linedef::from_doom_bytes(
+                            Ok(()) => linedefs.push(Linedef::from_doom_bytes(
                                 &bytes,
                                 map_type,
                                 &vertices_lock,
                                 &sidedefs_lock,
-                            )?)),
+                            )?),
                             Err(error) => match error.kind() {
                                 std::io::ErrorKind::UnexpectedEof => break,
                                 _ => return Err(error.into()),
@@ -403,12 +400,12 @@ impl Linedefs {
                     let mut bytes = [0; Linedef::HEXEN_BYTE_COUNT];
                     loop {
                         match reader.read_exact(&mut bytes).await {
-                            Ok(()) => linedefs.push(Arc::new(Linedef::from_hexen_bytes(
+                            Ok(()) => linedefs.push(Linedef::from_hexen_bytes(
                                 &bytes,
                                 map_type,
                                 &vertices_lock,
                                 &sidedefs_lock,
-                            )?)),
+                            )?),
                             Err(error) => match error.kind() {
                                 std::io::ErrorKind::UnexpectedEof => break,
                                 _ => return Err(error.into()),
@@ -422,7 +419,7 @@ impl Linedefs {
         debug!(count = ?linedefs.len(), "Loaded Linedefs");
 
         Ok(Self {
-            inner: linedefs,
+            linedefs: linedefs.into(),
             vertices,
             sidedefs,
         })
@@ -436,7 +433,9 @@ pub struct LinedefsLumpLoader {
 }
 
 #[async_trait]
-impl ResourceLoader<Linedefs> for LinedefsLumpLoader {
+impl ResourceLoader for LinedefsLumpLoader {
+    type Output = Linedefs;
+
     async fn load(
         &self,
         data: ResourceReadData,

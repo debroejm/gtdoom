@@ -55,7 +55,9 @@ impl ResourceDefaultLoader for Flat {
 pub struct FlatLoader(());
 
 #[async_trait]
-impl ResourceLoader<Flat> for FlatLoader {
+impl ResourceLoader for FlatLoader {
+    type Output = Flat;
+
     async fn load(
         &self,
         mut data: ResourceReadData,

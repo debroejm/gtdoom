@@ -1,23 +1,20 @@
 use async_trait::async_trait;
+use educe::Educe;
 use gtether::resource::manager::ResourceLoadContext;
 use gtether::resource::{ResourceLoadError, ResourceLoader, ResourceReadData};
 use i_triangle::i_overlay::i_float::float::compatible::FloatPointCompatible;
 use smol::io::{AsyncRead, AsyncReadExt};
-use std::ops::Deref;
 use tracing::debug;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+use crate::resource::indexed::Indexed;
+
+mod _fixed;
+pub use _fixed::*;
+
+#[derive(Educe, Debug, Clone, Copy, PartialEq, Eq)]
+#[educe(Deref)]
 #[repr(transparent)]
 pub struct Vertex(glm::TVec2<i16>);
-
-impl Deref for Vertex {
-    type Target = glm::TVec2<i16>;
-
-    #[inline]
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
 
 impl Vertex {
     pub const BYTE_COUNT: usize = 4;
@@ -40,7 +37,17 @@ impl Vertex {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+impl From<glm::TVec2<i16>> for Vertex {
+    #[inline]
+    fn from(value: glm::TVec2<i16>) -> Self {
+        Self(value)
+    }
+}
+
+pub type IndexedVertex = Indexed<Vertex, u16>;
+
+#[derive(Educe, Debug, Clone, Copy, PartialEq)]
+#[educe(Deref)]
 #[repr(transparent)]
 pub struct FloatVertex(glm::TVec2<f32>);
 
@@ -49,6 +56,13 @@ impl FloatVertex {
     pub fn equal_eps(&self, other: &FloatVertex, epsilon: f32) -> bool {
         let b = glm::equal_eps(self, other, epsilon);
         b.x && b.y
+    }
+}
+
+impl From<Vertex> for FloatVertex {
+    #[inline]
+    fn from(value: Vertex) -> Self {
+        Self(value.0.cast::<f32>())
     }
 }
 
@@ -69,25 +83,21 @@ impl FloatPointCompatible<f32> for FloatVertex {
     }
 }
 
-impl Deref for FloatVertex {
-    type Target = glm::TVec2<f32>;
-
-    #[inline]
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
+#[derive(Educe, Debug, Clone, Copy, PartialEq)]
+#[educe(Deref)]
+pub struct IndexedFloatVertex {
+    #[educe(Deref)]
+    inner: FloatVertex,
+    pub idx: u16,
 }
 
+impl IndexedFloatVertex {
+
+}
+
+#[derive(Educe)]
+#[educe(Deref)]
 pub struct Vertices(Vec<Vertex>);
-
-impl Deref for Vertices {
-    type Target = Vec<Vertex>;
-
-    #[inline]
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
 
 impl Vertices {
     #[inline]
@@ -117,7 +127,9 @@ impl Vertices {
 pub struct VerticesLumpLoader {}
 
 #[async_trait]
-impl ResourceLoader<Vertices> for VerticesLumpLoader {
+impl ResourceLoader for VerticesLumpLoader {
+    type Output = Vertices;
+
     async fn load(
         &self,
         data: ResourceReadData,

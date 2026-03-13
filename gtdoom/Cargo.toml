@@ -10,11 +10,14 @@ async_zip = { workspace = true }
 base64 = { workspace = true }
 bitflags = { workspace = true }
 chrono = { workspace = true }
+cordic = { workspace = true }
 educe = { workspace = true }
+fixed = { workspace = true }
 gtether = { workspace = true }
 image = { workspace = true }
 i_triangle = { workspace = true }
 nalgebra-glm = { workspace = true }
+num-traits = { workspace = true }
 parking_lot = { workspace = true }
 parry2d = { workspace = true }
 parry3d = { workspace = true }
