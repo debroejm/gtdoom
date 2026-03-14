@@ -1,18 +1,18 @@
 use async_trait::async_trait;
 use educe::Educe;
-use gtether::render::Renderer;
 use gtether::resource::manager::ResourceLoadContext;
 use gtether::resource::{Resource, ResourceLoadError, ResourceLoader, ResourceReadData};
 use smol::io::AsyncReadExt;
 use std::path::PathBuf;
 use std::sync::Arc;
+use gtether::resource::id::ResourceId;
 use tracing::debug;
 
 use crate::resource::indexed::{IndexedVec, IndexedArc};
 use crate::resource::map::sector::{Sector, Sectors};
 use crate::resource::map::MapType;
 use crate::resource::string_from_bytes_until_nul_checked;
-use crate::resource::texture::Texture;
+use crate::resource::texture::TextureId;
 
 #[derive(thiserror::Error, Debug)]
 pub enum SidedefLoadError {
@@ -81,9 +81,9 @@ impl Default for SidedefProperties {
 #[derive(Debug)]
 pub struct Sidedef {
     pub offset: glm::TVec2<i16>,
-    pub upper_tex: Option<Arc<Resource<Texture>>>,
-    pub lower_tex: Option<Arc<Resource<Texture>>>,
-    pub middle_tex: Option<Arc<Resource<Texture>>>,
+    pub upper_tex: Option<TextureId>,
+    pub lower_tex: Option<TextureId>,
+    pub middle_tex: Option<TextureId>,
     pub sector: IndexedArc<Sector>,
     pub properties: SidedefProperties,
 }
@@ -91,39 +91,17 @@ pub struct Sidedef {
 impl Sidedef {
     pub const BYTE_COUNT: usize = 30;
 
-    async fn load_texture(
-        name: &str,
-        renderer: &Arc<Renderer>,
-        ctx: &ResourceLoadContext,
-    ) -> Result<Option<Arc<Resource<Texture>>>, ResourceLoadError> {
+    fn parse_texture_id(name: &str) -> Option<TextureId> {
         if name == "-" {
-            return Ok(None)
-        }
-
-        // Prefer wall textures first
-        let result = ctx.get_with_loader(
-            PathBuf::from("Textures").join(name),
-            Texture::loader(renderer.clone()),
-        ).await;
-
-        match result {
-            Ok(flat) => Ok(Some(flat)),
-            Err(ResourceLoadError::NotFound(_)) => {
-                let tex = ctx.get_with_loader(
-                    PathBuf::from("Flats").join(name),
-                    Texture::flat_loader(renderer.clone()),
-                ).await?;
-                Ok(Some(tex))
-            },
-            Err(e) => Err(e),
+            None
+        } else {
+            Some(TextureId::Texture(ResourceId::from(name)))
         }
     }
 
     async fn load(
         bytes: &[u8; Self::BYTE_COUNT],
         sectors: &Sectors,
-        renderer: &Arc<Renderer>,
-        ctx: &ResourceLoadContext,
     ) -> Result<Self, ResourceLoadError> {
         let offset = glm::vec2(
             i16::from_le_bytes(bytes[0..2].try_into().unwrap()),
@@ -134,9 +112,9 @@ impl Sidedef {
         let lower_tex_name = string_from_bytes_until_nul_checked(&bytes[12..20]);
         let middle_tex_name = string_from_bytes_until_nul_checked(&bytes[20..28]);
 
-        let upper_tex = Self::load_texture(&upper_tex_name, renderer, ctx).await?;
-        let lower_tex = Self::load_texture(&lower_tex_name, renderer, ctx).await?;
-        let middle_tex = Self::load_texture(&middle_tex_name, renderer, ctx).await?;
+        let upper_tex = Self::parse_texture_id(&upper_tex_name);
+        let lower_tex = Self::parse_texture_id(&lower_tex_name);
+        let middle_tex = Self::parse_texture_id(&middle_tex_name);
 
         let sector_idx = i16::from_le_bytes(bytes[28..30].try_into().unwrap()) as u16;
         let sector = sectors.get(sector_idx as usize)
@@ -154,11 +132,11 @@ impl Sidedef {
     }
 
     #[inline]
-    pub fn texture(&self, location: SidedefLocation) -> Option<&Arc<Resource<Texture>>> {
+    pub fn texture_id(&self, location: SidedefLocation) -> Option<TextureId> {
         match location {
-            SidedefLocation::Upper => self.upper_tex.as_ref(),
-            SidedefLocation::Middle => self.middle_tex.as_ref(),
-            SidedefLocation::Lower => self.lower_tex.as_ref(),
+            SidedefLocation::Upper => self.upper_tex,
+            SidedefLocation::Middle => self.middle_tex,
+            SidedefLocation::Lower => self.lower_tex,
         }
     }
 
@@ -201,16 +179,14 @@ pub struct Sidedefs {
 
 impl Sidedefs {
     #[inline]
-    pub fn lump_loader(renderer: Arc<Renderer>, map_type: MapType) -> SidedefsLumpLoader {
+    pub fn lump_loader(map_type: MapType) -> SidedefsLumpLoader {
         SidedefsLumpLoader {
-            renderer,
             map_type,
         }
     }
 }
 
 pub struct SidedefsLumpLoader {
-    renderer: Arc<Renderer>,
     map_type: MapType,
 }
 
@@ -225,7 +201,7 @@ impl ResourceLoader for SidedefsLumpLoader {
     ) -> Result<Box<Sidedefs>, ResourceLoadError> {
         let sectors = ctx.get_with_loader(
             PathBuf::from(ctx.id().as_str()).parent().unwrap().join("SECTORS"),
-            Sectors::lump_loader(self.renderer.clone(), self.map_type),
+            Sectors::lump_loader(self.map_type),
         ).await?;
 
         let mut sidedefs = Vec::new();
@@ -238,8 +214,6 @@ impl ResourceLoader for SidedefsLumpLoader {
                     Ok(()) => sidedefs.push(Sidedef::load(
                         &bytes,
                         &sectors_lock,
-                        &self.renderer,
-                        ctx,
                     ).await?),
                     Err(error) => match error.kind() {
                         std::io::ErrorKind::UnexpectedEof => break,

@@ -1,7 +1,6 @@
 use async_trait::async_trait;
 use bitflags::bitflags;
 use educe::Educe;
-use gtether::render::Renderer;
 use gtether::resource::manager::ResourceLoadContext;
 use gtether::resource::{Resource, ResourceLoadError, ResourceLoader, ResourceReadData};
 use smol::io::{AsyncRead, AsyncReadExt};
@@ -355,12 +354,10 @@ pub struct Linedefs {
 impl Linedefs {
     #[inline]
     pub fn lump_loader(
-        renderer: Arc<Renderer>,
         map_type: MapType,
         map_format: MapFormat,
     ) -> LinedefsLumpLoader {
         LinedefsLumpLoader {
-            renderer,
             map_type,
             map_format,
         }
@@ -427,7 +424,6 @@ impl Linedefs {
 }
 
 pub struct LinedefsLumpLoader {
-    renderer: Arc<Renderer>,
     map_type: MapType,
     map_format: MapFormat,
 }
@@ -447,7 +443,7 @@ impl ResourceLoader for LinedefsLumpLoader {
         );
         let sidedefs_fut = ctx.get_with_loader(
             PathBuf::from(ctx.id().as_str()).parent().unwrap().join("SIDEDEFS"),
-            Sidedefs::lump_loader(self.renderer.clone(), self.map_type),
+            Sidedefs::lump_loader(self.map_type),
         );
         Ok(Box::new(Linedefs::read(
             data,

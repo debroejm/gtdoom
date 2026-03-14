@@ -1,19 +1,17 @@
 use async_trait::async_trait;
 use bitflags::bitflags;
 use educe::Educe;
-use gtether::render::Renderer;
+use gtether::resource::id::ResourceId;
 use gtether::resource::manager::ResourceLoadContext;
-use gtether::resource::{Resource, ResourceLoadError, ResourceLoader, ResourceReadData};
+use gtether::resource::{ResourceLoadError, ResourceLoader, ResourceReadData};
 use smol::io::AsyncReadExt;
-use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Duration;
 use tracing::debug;
 
 use crate::resource::indexed::IndexedVec;
 use crate::resource::map::MapType;
 use crate::resource::string_from_bytes_until_nul_checked;
-use crate::resource::texture::Texture;
+use crate::resource::texture::TextureId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpecialAlt {
@@ -441,8 +439,8 @@ pub struct Sector {
     pub idx: usize,
     pub floor_height: i16,
     pub ceil_height: i16,
-    pub floor_tex: Arc<Resource<Texture>>,
-    pub ceil_tex: Arc<Resource<Texture>>,
+    pub floor_tex: TextureId,
+    pub ceil_tex: TextureId,
     pub light_level: u8,
     pub special: Option<SectorSpecial>,
     pub special_flags: SectorSpecialFlags,
@@ -453,36 +451,10 @@ pub struct Sector {
 impl Sector {
     pub const BYTE_COUNT: usize = 26;
 
-    async fn load_texture(
-        name: &str,
-        renderer: &Arc<Renderer>,
-        ctx: &ResourceLoadContext,
-    ) -> Result<Arc<Resource<Texture>>, ResourceLoadError> {
-        // Prefer flats first
-        let result = ctx.get_with_loader(
-            PathBuf::from("Flats").join(name),
-            Texture::flat_loader(renderer.clone()),
-        ).await;
-
-        match result {
-            Ok(flat) => Ok(flat),
-            Err(ResourceLoadError::NotFound(_)) => {
-                let tex = ctx.get_with_loader(
-                    PathBuf::from("Textures").join(name),
-                    Texture::loader(renderer.clone()),
-                ).await?;
-                Ok(tex)
-            },
-            Err(e) => Err(e),
-        }
-    }
-
     async fn load(
         idx: usize,
         bytes: &[u8; Self::BYTE_COUNT],
         map_type: MapType,
-        renderer: &Arc<Renderer>,
-        ctx: &ResourceLoadContext,
     ) -> Result<Self, ResourceLoadError> {
         let floor_height = i16::from_le_bytes(bytes[0..2].try_into().unwrap());
         let ceil_height = i16::from_le_bytes(bytes[2..4].try_into().unwrap());
@@ -496,8 +468,8 @@ impl Sector {
         let flags = SectorFlags::empty();
         let tag = i16::from_le_bytes(bytes[24..26].try_into().unwrap()) as u16;
 
-        let floor_tex = Self::load_texture(&floor_tex_name, renderer, ctx).await?;
-        let ceil_tex = Self::load_texture(&ceil_tex_name, renderer, ctx).await?;
+        let floor_tex = TextureId::Flat(ResourceId::from(&floor_tex_name));
+        let ceil_tex = TextureId::Flat(ResourceId::from(&ceil_tex_name));
 
         Ok(Self {
             idx,
@@ -520,16 +492,14 @@ pub struct Sectors(IndexedVec<Sector>);
 
 impl Sectors {
     #[inline]
-    pub fn lump_loader(renderer: Arc<Renderer>, map_type: MapType) -> SectorsLumpLoader {
+    pub fn lump_loader(map_type: MapType) -> SectorsLumpLoader {
         SectorsLumpLoader {
-            renderer,
             map_type,
         }
     }
 }
 
 pub struct SectorsLumpLoader {
-    renderer: Arc<Renderer>,
     map_type: MapType,
 }
 
@@ -540,7 +510,7 @@ impl ResourceLoader for SectorsLumpLoader {
     async fn load(
         &self,
         mut data: ResourceReadData,
-        ctx: &ResourceLoadContext,
+        _ctx: &ResourceLoadContext,
     ) -> Result<Box<Sectors>, ResourceLoadError> {
         let mut bytes = [0; Sector::BYTE_COUNT];
         let mut sectors = Vec::new();
@@ -550,8 +520,6 @@ impl ResourceLoader for SectorsLumpLoader {
                     sectors.len(),
                     &bytes,
                     self.map_type,
-                    &self.renderer,
-                    ctx,
                 ).await?),
                 Err(error) => match error.kind() {
                     std::io::ErrorKind::UnexpectedEof => break,

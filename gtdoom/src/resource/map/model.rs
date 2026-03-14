@@ -6,15 +6,18 @@ use gtether::render::pipeline::{EngineGraphicsPipeline, VKGraphicsPipelineSource
 use gtether::render::render_pass::EngineRenderHandler;
 use gtether::render::uniform::Uniform;
 use gtether::render::{EngineDevice, Renderer, VulkanoError};
-use gtether::resource::id::ResourceId;
-use gtether::resource::Resource;
+use gtether::resource::manager::ResourceManager;
+use gtether::resource::{Resource, ResourceLoadError, ResourceLoadResult};
 use i_triangle::float::triangulation::Triangulation;
 use i_triangle::float::triangulator::Triangulator;
 use i_triangle::i_overlay::core::solver::Solver;
 use i_triangle::int::validation::Validation;
+use smol::future::FutureExt;
 use std::fmt::{Debug, Formatter};
+use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
-use tracing::{debug, warn};
+use tracing::debug;
 use vulkano::buffer::{AllocateBufferError, Buffer, BufferContents, BufferCreateInfo, BufferUsage, IndexBuffer, Subbuffer};
 use vulkano::command_buffer::{AutoCommandBufferBuilder, PrimaryAutoCommandBuffer};
 use vulkano::image::sampler::{Filter, Sampler, SamplerAddressMode, SamplerCreateInfo};
@@ -36,7 +39,7 @@ use crate::resource::map::gl_node::{GlSSector, GlVerticesReadLock};
 use crate::resource::map::linedef::{Linedef, LinedefFlags};
 use crate::resource::map::sidedef::{Sidedef, SidedefLocation};
 use crate::resource::map::vertex::FixedVertex;
-use crate::resource::texture::Texture;
+use crate::resource::texture::{Texture, TextureId};
 
 const MAP_VERTEX_EPSILON: f32 = 0.1;
 pub type MapVertexIndex = u32;
@@ -76,6 +79,8 @@ impl MapVertex {
 pub enum ChunkBuildError {
     #[error(transparent)]
     AllocateBufferError(#[from] AllocateBufferError),
+    #[error(transparent)]
+    ResourceLoadError(#[from] ResourceLoadError),
 }
 
 impl From<Validated<AllocateBufferError>> for ChunkBuildError {
@@ -194,10 +199,91 @@ impl IntoIterator for MapVertexIndices {
     }
 }
 
+enum TextureLoadMapStatus {
+    Loading(Pin<Box<dyn Future<Output=ResourceLoadResult<Texture>>>>),
+    Loaded(ResourceLoadResult<Texture>),
+}
+
+struct TextureLoadMapEntry {
+    id: TextureId,
+    status: TextureLoadMapStatus,
+}
+
+// TODO: split texture and texture metadata (e.g. size) loading when upstream gTether supports
+//  keying cached resources by type and/or loader
+struct TextureLoadMap {
+    resources: Arc<ResourceManager>,
+    renderer: Arc<Renderer>,
+    entries: Vec<TextureLoadMapEntry>,
+    index_map: HashMap<TextureId, MapTextureIndex>,
+}
+
+impl TextureLoadMap {
+    fn new(
+        resources: Arc<ResourceManager>,
+        renderer: Arc<Renderer>,
+    ) -> Self {
+        Self {
+            resources,
+            renderer,
+            entries: Vec::default(),
+            index_map: HashMap::default(),
+        }
+    }
+
+    fn register(&mut self, texture_id: TextureId) {
+        if !self.index_map.contains_key(&texture_id) {
+            let fut = match texture_id {
+                TextureId::Texture(id) => {
+                    // Prefer wall textures first
+                    self.resources.get_with_loader(
+                        PathBuf::from("Textures").join(id.as_str()),
+                        Texture::loader(self.renderer.clone()),
+                    ).or_get_with_loader(
+                        PathBuf::from("Flats").join(id.as_str()),
+                        Texture::flat_loader(self.renderer.clone()),
+                    ).boxed()
+                },
+                TextureId::Flat(id) => {
+                    // Prefer flats first
+                    self.resources.get_with_loader(
+                        PathBuf::from("Flats").join(id.as_str()),
+                        Texture::flat_loader(self.renderer.clone()),
+                    ).or_get_with_loader(
+                        PathBuf::from("Textures").join(id.as_str()),
+                        Texture::loader(self.renderer.clone()),
+                    ).boxed()
+                },
+            };
+
+            let idx = self.entries.len() as MapTextureIndex;
+            self.entries.push(TextureLoadMapEntry {
+                id: texture_id,
+                status: TextureLoadMapStatus::Loading(fut),
+            });
+            self.index_map.insert(texture_id, idx);
+        }
+    }
+
+    async fn get(&mut self, texture_id: TextureId) -> ResourceLoadResult<Texture> {
+        self.register(texture_id);
+        let idx = self.index_map[&texture_id];
+        let entry = &mut self.entries[idx as usize];
+        match &mut entry.status {
+            TextureLoadMapStatus::Loading(fut) => {
+                let result = fut.await;
+                entry.status = TextureLoadMapStatus::Loaded(result.clone());
+                result
+            },
+            TextureLoadMapStatus::Loaded(result) => result.clone(),
+        }
+    }
+}
+
 #[derive(Default, Clone)]
 pub struct MapTextures {
     textures: Vec<Arc<Resource<Texture>>>,
-    index_map: HashMap<ResourceId, MapTextureIndex>,
+    index_map: HashMap<TextureId, MapTextureIndex>,
 }
 
 impl Debug for MapTextures {
@@ -211,7 +297,7 @@ impl Debug for MapTextures {
 }
 
 impl MapTextures {
-    #[inline]
+    /*#[inline]
     pub fn get_or_insert(&mut self, texture: &Arc<Resource<Texture>>) -> MapTextureIndex {
         if let Some(idx) = self.index_map.get(texture.id()) {
             *idx
@@ -221,11 +307,33 @@ impl MapTextures {
             self.textures.push(texture.clone());
             idx
         }
+    }*/
+    #[inline]
+    pub fn get_index(&self, texture_id: TextureId) -> Option<MapTextureIndex> {
+        self.index_map.get(&texture_id).cloned()
     }
 
     #[inline]
     pub fn len(&self) -> usize {
         self.textures.len()
+    }
+
+    async fn extend_from_load_map(
+        &mut self,
+        load_map: TextureLoadMap,
+    ) -> Result<(), ResourceLoadError> {
+        for entry in load_map.entries {
+            if !self.index_map.contains_key(&entry.id) {
+                let idx = self.textures.len() as MapTextureIndex;
+                let texture = match entry.status {
+                    TextureLoadMapStatus::Loading(fut) => fut.await?,
+                    TextureLoadMapStatus::Loaded(result) => result?,
+                };
+                self.textures.push(texture);
+                self.index_map.insert(entry.id, idx);
+            }
+        }
+        Ok(())
     }
 
     #[inline]
@@ -242,19 +350,27 @@ pub struct MapModelData {
 }
 
 struct IndexChunk {
-    texture: Arc<Resource<Texture>>,
+    texture_id: TextureId,
     indices: Vec<MapVertexIndex>,
 }
 
 pub struct ChunkBuilder {
     vertices: MapVertices,
-    index_chunks: HashMap<ResourceId, IndexChunk>,
+    textures: TextureLoadMap,
+    index_chunks: HashMap<TextureId, IndexChunk>,
     triangulator: Triangulator<MapVertexIndex>,
     triangulation: Triangulation<FixedVertex, MapVertexIndex>,
 }
 
-impl Default for ChunkBuilder {
-    fn default() -> Self {
+impl ChunkBuilder {
+    // TODO: increase this if necessary
+    const TRIANGULATOR_BASE_CAPACITY: usize = 256;
+
+    fn new(
+        resources: Arc<ResourceManager>,
+        renderer: Arc<Renderer>,
+    ) -> Self {
+        let textures = TextureLoadMap::new(resources, renderer);
         let mut triangulator = Triangulator::new(
             Self::TRIANGULATOR_BASE_CAPACITY,
             Validation::default(),
@@ -267,27 +383,23 @@ impl Default for ChunkBuilder {
 
         Self {
             vertices: MapVertices::default(),
+            textures,
             index_chunks: HashMap::default(),
             triangulator,
             triangulation,
         }
     }
-}
 
-impl ChunkBuilder {
-    // TODO: increase this if necessary
-    const TRIANGULATOR_BASE_CAPACITY: usize = 256;
-
-    fn add_vertical_quad(
+    async fn add_vertical_quad(
         &mut self,
         a: glm::TVec3<f32>,
         b: glm::TVec3<f32>,
         linedef: &Linedef,
         sidedef: &Sidedef,
         location: SidedefLocation,
-    ) {
-        let texture = sidedef.texture(location);
-        if let Some(texture) = texture {
+    ) -> Result<(), ResourceLoadError> {
+        let texture_id = sidedef.texture_id(location);
+        if let Some(texture_id) = texture_id {
             let light = sidedef.light() as f32 / 255.0;
             let tag = sidedef.sector.tag;
 
@@ -295,8 +407,10 @@ impl ChunkBuilder {
             let uv_scale = sidedef.scale(location);
 
             let tex_size = {
-                let texture = texture.read();
-                glm::vec2(texture.size.x as f32, texture.size.y as f32)
+                // TODO: load textures in the background
+                let texture = self.textures.get(texture_id).await?;
+                let tex_lock = texture.read();
+                glm::vec2(tex_lock.size.x as f32, tex_lock.size.y as f32)
             };
 
             // Normalize the offset
@@ -359,18 +473,22 @@ impl ChunkBuilder {
                 tag,
             });
 
-            let texture = self.index_chunks.entry(texture.id().clone())
+            let index_chunk = self.index_chunks.entry(texture_id)
                 .or_insert_with(|| IndexChunk {
-                    texture: texture.clone(),
+                    texture_id,
                     indices: Vec::new(),
                 });
-            texture.indices.extend_from_slice(&[i_a, i_b, i_c, i_a, i_d, i_b]);
+            index_chunk.indices.extend_from_slice(&[i_a, i_b, i_c, i_a, i_d, i_b]);
+            Ok(())
         } else {
-            warn!(?a, ?b, "Missing texture for quad");
+            Err(ResourceLoadError::from(format!("Missing texture for quad (a={a:?}, b={b:?})")))
         }
     }
 
-    pub fn add_linedef(&mut self, linedef: &Linedef) {
+    pub async fn add_linedef(
+        &mut self,
+        linedef: &Linedef,
+    ) -> Result<(), ResourceLoadError> {
         match (&linedef.front_sidedef, &linedef.back_sidedef) {
             (Some(front), Some(back)) => {
                 // Lower
@@ -381,7 +499,7 @@ impl ChunkBuilder {
                         linedef,
                         front,
                         SidedefLocation::Lower,
-                    );
+                    ).await?;
                 } else if front.sector.floor_height > back.sector.floor_height {
                     self.add_vertical_quad(
                         linedef.end_vertex.to_3d(back.sector.floor_height as f32),
@@ -389,7 +507,7 @@ impl ChunkBuilder {
                         linedef,
                         back,
                         SidedefLocation::Lower,
-                    );
+                    ).await?;
                 }
 
                 // Upper
@@ -400,7 +518,7 @@ impl ChunkBuilder {
                         linedef,
                         front,
                         SidedefLocation::Upper,
-                    );
+                    ).await?;
                 } else if front.sector.ceil_height < back.sector.ceil_height {
                     self.add_vertical_quad(
                         linedef.end_vertex.to_3d(front.sector.ceil_height as f32),
@@ -408,7 +526,7 @@ impl ChunkBuilder {
                         linedef,
                         back,
                         SidedefLocation::Upper,
-                    );
+                    ).await?;
                 }
 
                 // TODO: Add double-sided middle textures
@@ -421,7 +539,7 @@ impl ChunkBuilder {
                     linedef,
                     front,
                     SidedefLocation::Middle,
-                );
+                ).await?;
             },
             (None, Some(back)) => {
                 // Middle
@@ -431,10 +549,11 @@ impl ChunkBuilder {
                     linedef,
                     back,
                     SidedefLocation::Middle,
-                );
+                ).await?;
             },
             _ => {},
         }
+        Ok(())
     }
 
     pub fn add_ssector(&mut self, ssector: &GlSSector, gl_vertices: &GlVerticesReadLock) {
@@ -463,31 +582,33 @@ impl ChunkBuilder {
             .unzip();
 
         {
-            let texture = self.index_chunks.entry(ssector.sector.floor_tex.id().clone())
+            self.textures.register(ssector.sector.floor_tex);
+            let index_chunk = self.index_chunks.entry(ssector.sector.floor_tex)
                 .or_insert_with(|| IndexChunk {
-                    texture: ssector.sector.floor_tex.clone(),
+                    texture_id: ssector.sector.floor_tex,
                     indices: Vec::new(),
                 });
             for idx in self.triangulation.indices.iter() {
-                texture.indices.push(floor_indices[*idx as usize]);
+                index_chunk.indices.push(floor_indices[*idx as usize]);
             }
         }
 
         {
-            let texture = self.index_chunks.entry(ssector.sector.ceil_tex.id().clone())
+            self.textures.register(ssector.sector.ceil_tex);
+            let index_chunk = self.index_chunks.entry(ssector.sector.ceil_tex)
                 .or_insert_with(|| IndexChunk {
-                    texture: ssector.sector.ceil_tex.clone(),
+                    texture_id: ssector.sector.ceil_tex,
                     indices: Vec::new(),
                 });
             // Ceiling textures need reversed indices because the triangles face the
             // opposite direction
             for idx in self.triangulation.indices.iter().rev() {
-                texture.indices.push(ceil_indices[*idx as usize]);
+                index_chunk.indices.push(ceil_indices[*idx as usize]);
             }
         }
     }
 
-    pub fn build(
+    pub async fn build(
         self,
         model_data: &mut MapModelData,
     ) -> Result<Chunk, ChunkBuildError> {
@@ -496,17 +617,19 @@ impl ChunkBuilder {
             "Building chunk"
         );
 
-        let index_remap = model_data.vertices.extend(self.vertices);
+        let vertex_index_remap = model_data.vertices.extend(self.vertices);
+        model_data.textures.extend_from_load_map(self.textures).await?;
 
         let mut index_segments = Vec::with_capacity(self.index_chunks.len());
         for chunk_tex in self.index_chunks.values() {
-            let texture_id = model_data.textures.get_or_insert(&chunk_tex.texture);
+            let texture_index = model_data.textures.get_index(chunk_tex.texture_id)
+                .expect("texture should be registered");
             let first_index = model_data.vertex_indices.len() as MapVertexIndex;
             let index_count = chunk_tex.indices.len() as u32;
             model_data.vertex_indices.extend(chunk_tex.indices.iter()
-                .map(|idx| index_remap[(*idx) as usize]));
+                .map(|idx| vertex_index_remap[(*idx) as usize]));
             index_segments.push(ChunkIndexSegment {
-                texture_id,
+                texture_index,
                 first_index,
                 index_count,
             });
@@ -519,7 +642,7 @@ impl ChunkBuilder {
 }
 
 struct ChunkIndexSegment {
-    texture_id: u32,
+    texture_index: MapTextureIndex,
     first_index: MapVertexIndex,
     index_count: u32,
 }
@@ -527,7 +650,7 @@ struct ChunkIndexSegment {
 impl ChunkIndexSegment {
     fn to_pc(&self) -> shaders::frag::PCData {
         shaders::frag::PCData {
-            tex_id: self.texture_id,
+            tex_id: self.texture_index,
         }
     }
 }
@@ -538,8 +661,11 @@ pub struct Chunk {
 
 impl Chunk {
     #[inline]
-    pub fn builder() -> ChunkBuilder {
-        ChunkBuilder::default()
+    pub fn builder(
+        resources: Arc<ResourceManager>,
+        renderer: Arc<Renderer>,
+    ) -> ChunkBuilder {
+        ChunkBuilder::new(resources, renderer)
     }
 
     pub fn draw(

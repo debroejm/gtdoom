@@ -8,9 +8,8 @@ pub mod vertex;
 
 use async_trait::async_trait;
 use educe::Educe;
-use gtether::render::Renderer;
 use gtether::resource::manager::ResourceLoadContext;
-use gtether::resource::{Resource, ResourceLoadError, ResourceLoader, ResourceReadData};
+use gtether::resource::{Resource, ResourceDefaultLoader, ResourceLoadError, ResourceLoader, ResourceReadData};
 use std::fmt;
 use std::fmt::{Debug, Formatter};
 use std::ops::Deref;
@@ -81,13 +80,6 @@ pub struct Map {
 
 impl Map {
     #[inline]
-    pub fn loader(renderer: Arc<Renderer>) -> MapLoader {
-        MapLoader {
-            renderer,
-        }
-    }
-
-    #[inline]
     pub fn linedefs(&self) -> &Arc<Resource<Linedefs>> {
         &self.linedefs
     }
@@ -98,9 +90,16 @@ impl Map {
     }
 }
 
-pub struct MapLoader {
-    renderer: Arc<Renderer>,
+impl ResourceDefaultLoader for Map {
+    type Loader = MapLoader;
+
+    fn default_loader() -> Self::Loader {
+        MapLoader
+    }
 }
+
+#[derive(Default, Clone, Copy)]
+pub struct MapLoader;
 
 #[async_trait]
 impl ResourceLoader for MapLoader {
@@ -131,7 +130,7 @@ impl ResourceLoader for MapLoader {
             MapFormat::Doom | MapFormat::Hexen => {
                 let sectors_fut = ctx.get_with_loader(
                     PathBuf::from(ctx.id().as_str()).join("SECTORS"),
-                    Sectors::lump_loader(self.renderer.clone(), m_type),
+                    Sectors::lump_loader(m_type),
                 );
                 let vertices_fut = ctx.get_with_loader(
                     PathBuf::from(ctx.id().as_str()).join("VERTEXES"),
@@ -139,15 +138,15 @@ impl ResourceLoader for MapLoader {
                 );
                 let sidedefs_fut = ctx.get_with_loader(
                     PathBuf::from(ctx.id().as_str()).join("SIDEDEFS"),
-                    Sidedefs::lump_loader(self.renderer.clone(), m_type),
+                    Sidedefs::lump_loader(m_type),
                 );
                 let linedefs_fut = ctx.get_with_loader(
                     PathBuf::from(ctx.id().as_str()).join("LINEDEFS"),
-                    Linedefs::lump_loader(self.renderer.clone(), m_type, m_format),
+                    Linedefs::lump_loader(m_type, m_format),
                 );
                 let gl_nodes_fut = ctx.get_with_loader(
                     PathBuf::from(ctx.id().as_str()).join("SSECTORS"),
-                    GlNodes::lump_loader(self.renderer.clone(), m_type, m_format),
+                    GlNodes::lump_loader(m_type, m_format),
                 ).or_loader_default();
 
                 Ok(Box::new(Map {

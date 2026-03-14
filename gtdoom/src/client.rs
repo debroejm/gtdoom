@@ -50,17 +50,19 @@ impl Command for ChangeMapCommand {
         ParamCountCheck::Equal(1).check(parameters.len() as u32)?;
 
         let map_name = parameters[0].as_str();
-        let map = future::block_on(self.resources.get_with_loader(
-            map_name,
-            Map::loader(self.window.renderer().clone()),
-        )).map_err(|e| CommandError::CommandFailure(Box::new(e)))?;
+        let map = future::block_on(self.resources.get::<Map>(map_name))
+            .map_err(|e| CommandError::CommandFailure(Box::new(e)))?;
         info!(?map_name, ?map, "Loaded map");
 
-        let (chunk, map_model_data) = {
+        let (chunk, map_model_data) = future::block_on(async {
             let map = map.read();
-            let mut builder = Chunk::builder();
+            let mut builder = Chunk::builder(
+                self.resources.clone(),
+                self.window.renderer().clone(),
+            );
             for linedef in map.linedefs().read().iter() {
-                builder.add_linedef(&linedef);
+                builder.add_linedef(&linedef).await
+                    .map_err(|e| CommandError::CommandFailure(Box::new(e)))?;
             }
             {
                 let gl_nodes = map.gl_nodes().read();
@@ -70,9 +72,10 @@ impl Command for ChangeMapCommand {
                 }
             }
             let mut map_model_data = MapModelData::default();
-            let chunk = Arc::new(builder.build(&mut map_model_data).unwrap());
-            (chunk, map_model_data)
-        };
+            let chunk = builder.build(&mut map_model_data).await
+                .map_err(|e| CommandError::CommandFailure(Box::new(e)))?;
+            Ok::<_, CommandError>((Arc::new(chunk), map_model_data))
+        })?;
         debug!(?map_name, "Parsed map model data");
 
         let renderer_camera = self.camera.clone();

@@ -8,6 +8,8 @@ use image::{DynamicImage, GenericImage, GenericImageView};
 use smol::io::AsyncReadExt;
 use std::path::PathBuf;
 use std::sync::Arc;
+use educe::Educe;
+use gtether::resource::id::ResourceId;
 use vulkano::image::view::ImageView;
 
 use crate::resource::flat::Flat;
@@ -42,6 +44,23 @@ impl TextureFormat {
         match self {
             Self::Doom => 1,
             Self::ZDoom => 2,
+        }
+    }
+}
+
+#[derive(Educe, Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[educe(Deref)]
+pub enum TextureId {
+    Flat(ResourceId),
+    Texture(ResourceId),
+}
+
+impl From<TextureId> for ResourceId {
+    #[inline]
+    fn from(value: TextureId) -> Self {
+        match value {
+            TextureId::Flat(id) => id,
+            TextureId::Texture(id) => id,
         }
     }
 }

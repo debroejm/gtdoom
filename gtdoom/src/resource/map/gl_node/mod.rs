@@ -1,6 +1,5 @@
 use async_trait::async_trait;
 use educe::Educe;
-use gtether::render::Renderer;
 use gtether::resource::manager::ResourceLoadContext;
 use gtether::resource::{Resource, ResourceLoadError, ResourceLoader, ResourceLoaderDefault, ResourceLock, ResourceReadData};
 use smol::io::{AsyncRead, AsyncReadExt};
@@ -385,12 +384,10 @@ pub struct GlNodes {
 impl GlNodes {
     #[inline]
     pub fn lump_loader(
-        renderer: Arc<Renderer>,
         map_type: MapType,
         map_format: MapFormat,
     ) -> GlNodesLumpLoader {
         GlNodesLumpLoader {
-            renderer,
             map_type,
             map_format,
         }
@@ -512,7 +509,6 @@ impl GlNodes {
 }
 
 pub struct GlNodesLumpLoader {
-    renderer: Arc<Renderer>,
     map_type: MapType,
     map_format: MapFormat,
 }
@@ -546,7 +542,7 @@ impl ResourceLoader for GlNodesLumpLoader {
         );
         let linedefs_fut = ctx.get_with_loader(
             self.get_parent_id_path(ctx, "LINEDEFS")?,
-            Linedefs::lump_loader(self.renderer.clone(), self.map_type, self.map_format),
+            Linedefs::lump_loader(self.map_type, self.map_format),
         );
 
         let mut signature = [0; 4];
@@ -586,7 +582,7 @@ impl ResourceLoaderDefault for GlNodesLumpLoader {
         );
         let linedefs_fut = ctx.get_with_loader(
             self.get_parent_id_path(ctx, "LINEDEFS")?,
-            Linedefs::lump_loader(self.renderer.clone(), self.map_type, self.map_format),
+            Linedefs::lump_loader(self.map_type, self.map_format),
         );
 
         let vertices = vertices_fut.await?;
