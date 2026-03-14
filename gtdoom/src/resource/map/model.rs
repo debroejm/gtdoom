@@ -1,4 +1,5 @@
 use ahash::HashMap;
+use fixed::traits::LossyFrom;
 use gtether::render::descriptor_set::EngineDescriptorSet;
 use gtether::render::image::{EngineResourceImages, EngineSampler};
 use gtether::render::pipeline::{EngineGraphicsPipeline, VKGraphicsPipelineSource, ViewportType};
@@ -7,11 +8,10 @@ use gtether::render::uniform::Uniform;
 use gtether::render::{EngineDevice, Renderer, VulkanoError};
 use gtether::resource::id::ResourceId;
 use gtether::resource::Resource;
-use i_triangle::float::triangulatable::Triangulatable;
-use i_triangle::i_overlay::i_shape::base::data::{Contour, Shape as ContourShape};
-use parry2d::na::{Isometry2, Point2};
-use parry2d::query::PointQuery;
-use parry2d::shape::{Compound, ConvexPolygon, SharedShape};
+use i_triangle::float::triangulation::Triangulation;
+use i_triangle::float::triangulator::Triangulator;
+use i_triangle::i_overlay::core::solver::Solver;
+use i_triangle::int::validation::Validation;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 use tracing::{debug, warn};
@@ -32,11 +32,10 @@ use vulkano::render_pass::Subpass;
 use vulkano::Validated;
 
 use crate::render::camera::{Camera, VP};
-use crate::resource::indexed::IndexedArc;
+use crate::resource::map::gl_node::{GlSSector, GlVerticesReadLock};
 use crate::resource::map::linedef::{Linedef, LinedefFlags};
-use crate::resource::map::sector::Sector;
 use crate::resource::map::sidedef::{Sidedef, SidedefLocation};
-use crate::resource::map::vertex::FloatVertex;
+use crate::resource::map::vertex::FixedVertex;
 use crate::resource::texture::Texture;
 
 const MAP_VERTEX_EPSILON: f32 = 0.1;
@@ -242,309 +241,43 @@ pub struct MapModelData {
     pub textures: MapTextures,
 }
 
-struct NestedCompound {
-    contour: Contour<FloatVertex>,
-    shape: Compound,
-    sub_shapes: Vec<Box<NestedCompound>>,
-}
-
-impl NestedCompound {
-    fn contour_angle(contour: &Contour<FloatVertex>) -> f32 {
-        if contour.len() < 2 {
-            return 0.0
-        }
-
-        let mut iter = contour.iter();
-        let first = iter.next().unwrap();
-        let second = iter.next().unwrap();
-
-        let mut total_angle = 0.0;
-
-        let mut prev = second;
-        let mut prev_angle = (second.y - first.y).atan2(second.x - first.x);
-        for next in iter.chain([first, second]) {
-            let next_angle = (next.y - prev.y).atan2(next.x - prev.x);
-            let mut diff = prev_angle - next_angle;
-            if diff < -std::f32::consts::PI {
-                diff += 2.0 * std::f32::consts::PI;
-            } else if diff > std::f32::consts::PI {
-                diff -= 2.0 * std::f32::consts::PI;
-            }
-            total_angle += diff;
-            prev = next;
-            prev_angle = next_angle;
-        }
-
-        total_angle
-    }
-
-    fn contour_to_complex_shape(contour: &mut Contour<FloatVertex>) -> Compound {
-        if Self::contour_angle(contour) > 0.0 {
-            // Is CW, needs to be CCW
-            contour.reverse();
-        }
-
-        let shapes = contour.triangulate().into_delaunay().to_convex_polygons().into_iter()
-            .map(|contour| {
-                let convex = ConvexPolygon::from_convex_polyline(contour.into_iter()
-                    .map(|v| Point2::new(v.x, v.y))
-                    .collect()).unwrap();
-                (Isometry2::identity(), SharedShape::new(convex))
-            })
-            .collect::<Vec<_>>();
-
-        Compound::new(shapes)
-    }
-
-    fn new(mut contour: Contour<FloatVertex>) -> Self {
-        let shape = Self::contour_to_complex_shape(&mut contour);
-        Self {
-            contour,
-            shape,
-            sub_shapes: Vec::new(),
-        }
-    }
-
-    fn contains(&self, other: &NestedCompound) -> bool {
-        // Sub-Sector shapes from Doom maps should NOT intersect, so if any point is inside, we can
-        // assume the whole shape is inside
-        let p = &other.shape.shapes()[0].1
-            .as_convex_polygon().unwrap()
-            .points()[0];
-        self.shape.contains_local_point(p)
-    }
-
-    fn insert_sub_shape(&mut self, mut new_sub_shape: NestedCompound) {
-        let sub_sub_shapes = self.sub_shapes
-            .extract_if(.., |ss| new_sub_shape.contains(ss))
-            .collect::<Vec<_>>();
-        new_sub_shape.sub_shapes = sub_sub_shapes;
-
-        for ss in &mut self.sub_shapes {
-            if ss.contains(&new_sub_shape) {
-                ss.insert_sub_shape(new_sub_shape);
-                return
-            }
-        }
-
-        self.sub_shapes.push(Box::new(new_sub_shape));
-    }
-
-    fn into_contour_shapes(self, output: &mut Vec<ContourShape<FloatVertex>>) {
-        let mut contour_shape = ContourShape::with_capacity(1 + self.sub_shapes.len());
-        contour_shape.push(self.contour);
-        for mut hole in self.sub_shapes {
-            hole.contour.reverse();
-            contour_shape.push(hole.contour);
-            for sub_shape in hole.sub_shapes {
-                sub_shape.into_contour_shapes(output);
-            }
-        }
-        output.push(contour_shape);
-    }
-}
-
-struct SectorBuilder {
-    sector: IndexedArc<Sector>,
-    open_contours: Vec<Contour<FloatVertex>>,
-    closed_shapes: Vec<NestedCompound>,
-}
-
-impl SectorBuilder {
-    fn new(sector: IndexedArc<Sector>) -> Self {
-        Self {
-            sector,
-            open_contours: Vec::new(),
-            closed_shapes: Vec::new(),
-        }
-    }
-
-    fn add_closed_contour(
-        closed_shapes: &mut Vec<NestedCompound>,
-        closed_contour: Contour<FloatVertex>,
-    ) {
-        let new_shape = NestedCompound::new(closed_contour);
-        for closed_shape in closed_shapes.iter_mut() {
-            if closed_shape.contains(&new_shape) {
-                closed_shape.insert_sub_shape(new_shape);
-                return
-            }
-        }
-        closed_shapes.push(new_shape);
-    }
-
-    fn find_matching_indices(
-        a: &Contour<FloatVertex>,
-        b: &Contour<FloatVertex>,
-    ) -> Option<(usize, usize)> {
-        for i_b in 0..b.len() {
-            for i_a in (0..a.len()).rev() {
-                if a[i_a].equal_eps(&b[i_b], MAP_VERTEX_EPSILON) {
-                    return Some((i_a, i_b))
-                }
-            }
-        }
-        None
-    }
-
-    fn add_line(&mut self, a: FloatVertex, b: FloatVertex) {
-        // 1. Look for a prefix match first
-        let mut new_segment = vec![b];
-        for idx in 0..self.open_contours.len() {
-            if let Some(first) = self.open_contours[idx].first() {
-                if b.equal_eps(first, 0.01) {
-                    let contour = self.open_contours.swap_remove(idx);
-                    if a.equal_eps(contour.last().unwrap(), 0.01) {
-                        // Closing this contour
-                        Self::add_closed_contour(&mut self.closed_shapes, contour);
-                        return
-                    }
-                    new_segment = contour;
-                    break
-                }
-            }
-        }
-
-        // 2. Look for a suffix match to attach the new segment to
-        for contour in &mut self.open_contours {
-            if let Some(last) = contour.last() && last.equal_eps(&a, MAP_VERTEX_EPSILON) {
-                // Find all closed contours created with the new segment
-                while let Some((i_a, i_b)) = Self::find_matching_indices(contour, &new_segment) {
-                    let mut closed_contour = contour.split_off(i_a);
-                    let extra = new_segment.split_off(i_b);
-                    closed_contour.extend(new_segment);
-                    new_segment = extra;
-                    Self::add_closed_contour(&mut self.closed_shapes, closed_contour);
-                }
-
-                // Add the remaining new segment to the contour
-                contour.extend(new_segment);
-
-                // Found a match, done processing
-                return
-            }
-        }
-
-        // 3. No suffix matches, add a new contour
-        new_segment.insert(0, a);
-        self.open_contours.push(new_segment);
-    }
-
-    fn add_linedef(&mut self, linedef: &Linedef) {
-        let front_idx = linedef.front_sidedef.as_ref().map(|front| front.sector.idx);
-        let back_idx = linedef.back_sidedef.as_ref().map(|back| back.sector.idx);
-        match (front_idx, back_idx) {
-            (Some(front_idx), Some(back_idx)) => {
-                if front_idx == self.sector.idx {
-                    if back_idx == self.sector.idx {
-                        // Linedef is completely inside the sector, ignore for building geometry
-                    } else {
-                        self.add_line(linedef.start_vertex.to_float(), linedef.end_vertex.to_float());
-                    }
-                } else if back_idx == self.sector.idx {
-                    // Flip the vertices for easy matching
-                    self.add_line(linedef.end_vertex.to_float(), linedef.start_vertex.to_float());
-                }
-            },
-            (Some(front_idx), None) => {
-                if front_idx == self.sector.idx {
-                    self.add_line(linedef.start_vertex.to_float(), linedef.end_vertex.to_float());
-                }
-            },
-            (None, Some(back_idx)) => {
-                if back_idx == self.sector.idx {
-                    // Flip the vertices for easy matching
-                    self.add_line(linedef.end_vertex.to_float(), linedef.start_vertex.to_float());
-                }
-            },
-            _ => {},
-        }
-    }
-
-    fn build(
-        self,
-        vertices: &mut MapVertices,
-        index_chunks: &mut HashMap<ResourceId, IndexChunk>,
-    ) {
-        let light = self.sector.light_level as f32 / 255.0;
-        let tag = self.sector.tag;
-
-        if !self.open_contours.is_empty() {
-            warn!(
-                sector_id = ?self.sector.idx,
-                count = ?self.open_contours.len(),
-                contours = ?self.open_contours,
-                "Found incomplete sector contours"
-            );
-        }
-
-        let mut contour_shapes = Vec::new();
-        for shape in self.closed_shapes {
-            shape.into_contour_shapes(&mut contour_shapes);
-        }
-
-        for contour_shape in contour_shapes {
-            let triangulation = contour_shape.triangulate()
-                .into_delaunay()
-                .to_triangulation::<usize>();
-
-            let (floor_indices, ceil_indices): (Vec<_>, Vec<_>) = triangulation.points.into_iter()
-                .map(|v| {
-                    // Floor/Ceil flat texture UVs are based off of a global grid of 64x64 flats
-                    let floor_idx = vertices.get_or_insert(MapVertex {
-                        position: glm::vec3(v[0], v[1], self.sector.floor_height as f32),
-                        uv: glm::vec2(v[0] / 64.0, v[1] / 64.0),
-                        light, tag,
-                    });
-                    let ceil_idx = vertices.get_or_insert(MapVertex {
-                        position: glm::vec3(v[0], v[1], self.sector.ceil_height as f32),
-                        uv: glm::vec2(v[0] / 64.0, v[1] / 64.0),
-                        light, tag,
-                    });
-                    (floor_idx, ceil_idx)
-                })
-                .unzip();
-
-            {
-                let texture = index_chunks.entry(self.sector.floor_tex.id().clone())
-                    .or_insert_with(|| IndexChunk {
-                        texture: self.sector.floor_tex.clone(),
-                        indices: Vec::new(),
-                    });
-                for idx in triangulation.indices.iter() {
-                    texture.indices.push(floor_indices[*idx]);
-                }
-            }
-
-            {
-                let texture = index_chunks.entry(self.sector.ceil_tex.id().clone())
-                    .or_insert_with(|| IndexChunk {
-                        texture: self.sector.ceil_tex.clone(),
-                        indices: Vec::new(),
-                    });
-                // Ceiling textures need reversed indices because the triangles face the
-                // opposite direction
-                for idx in triangulation.indices.iter().rev() {
-                    texture.indices.push(ceil_indices[*idx]);
-                }
-            }
-        }
-    }
-}
-
 struct IndexChunk {
     texture: Arc<Resource<Texture>>,
     indices: Vec<MapVertexIndex>,
 }
 
-#[derive(Default)]
 pub struct ChunkBuilder {
     vertices: MapVertices,
     index_chunks: HashMap<ResourceId, IndexChunk>,
-    sectors: HashMap<usize, SectorBuilder>,
+    triangulator: Triangulator<MapVertexIndex>,
+    triangulation: Triangulation<FixedVertex, MapVertexIndex>,
+}
+
+impl Default for ChunkBuilder {
+    fn default() -> Self {
+        let mut triangulator = Triangulator::new(
+            Self::TRIANGULATOR_BASE_CAPACITY,
+            Validation::default(),
+            Solver::default(),
+        );
+        triangulator.delaunay(true);
+        triangulator.earcut(true);
+
+        let triangulation = Triangulation::with_capacity(Self::TRIANGULATOR_BASE_CAPACITY);
+
+        Self {
+            vertices: MapVertices::default(),
+            index_chunks: HashMap::default(),
+            triangulator,
+            triangulation,
+        }
+    }
 }
 
 impl ChunkBuilder {
+    // TODO: increase this if necessary
+    const TRIANGULATOR_BASE_CAPACITY: usize = 256;
+
     fn add_vertical_quad(
         &mut self,
         a: glm::TVec3<f32>,
@@ -679,13 +412,6 @@ impl ChunkBuilder {
                 }
 
                 // TODO: Add double-sided middle textures
-
-                self.sectors.entry(front.sector.idx)
-                    .or_insert_with(|| SectorBuilder::new(front.sector.clone()))
-                    .add_linedef(linedef);
-                self.sectors.entry(back.sector.idx)
-                    .or_insert_with(|| SectorBuilder::new(back.sector.clone()))
-                    .add_linedef(linedef);
             },
             (Some(front), None) => {
                 // Middle
@@ -696,10 +422,6 @@ impl ChunkBuilder {
                     front,
                     SidedefLocation::Middle,
                 );
-
-                self.sectors.entry(front.sector.idx)
-                    .or_insert_with(|| SectorBuilder::new(front.sector.clone()))
-                    .add_linedef(linedef);
             },
             (None, Some(back)) => {
                 // Middle
@@ -710,23 +432,65 @@ impl ChunkBuilder {
                     back,
                     SidedefLocation::Middle,
                 );
-
-                self.sectors.entry(back.sector.idx)
-                    .or_insert_with(|| SectorBuilder::new(back.sector.clone()))
-                    .add_linedef(linedef);
             },
             _ => {},
         }
     }
 
-    pub fn build(
-        mut self,
-        model_data: &mut MapModelData,
-    ) -> Result<Chunk, ChunkBuildError> {
-        for (_, sector_builder) in self.sectors {
-            sector_builder.build(&mut self.vertices, &mut self.index_chunks);
+    pub fn add_ssector(&mut self, ssector: &GlSSector, gl_vertices: &GlVerticesReadLock) {
+        let light = ssector.sector.light_level as f32 / 255.0;
+        let tag = ssector.sector.tag;
+
+        let points = ssector.contour(gl_vertices)
+            .map(|indexed| indexed.to_fixed().into_inner())
+            .collect::<Vec<_>>();
+        self.triangulator.triangulate_into(&points, &mut self.triangulation);
+
+        let (floor_indices, ceil_indices): (Vec<_>, Vec<_>) = self.triangulation.points.iter()
+            .map(|v| {
+                // Floor/Ceil flat texture UVs are based off of a global grid of 64x64 flats
+                let uv = glm::vec2(f32::lossy_from(v.x) / 64.0, f32::lossy_from(v.y) / 64.0);
+                let floor_idx = self.vertices.get_or_insert(MapVertex {
+                    position: v.to_3d(ssector.sector.floor_height as f32),
+                    uv, light, tag,
+                });
+                let ceil_idx = self.vertices.get_or_insert(MapVertex {
+                    position: v.to_3d(ssector.sector.ceil_height as f32),
+                    uv, light, tag,
+                });
+                (floor_idx, ceil_idx)
+            })
+            .unzip();
+
+        {
+            let texture = self.index_chunks.entry(ssector.sector.floor_tex.id().clone())
+                .or_insert_with(|| IndexChunk {
+                    texture: ssector.sector.floor_tex.clone(),
+                    indices: Vec::new(),
+                });
+            for idx in self.triangulation.indices.iter() {
+                texture.indices.push(floor_indices[*idx as usize]);
+            }
         }
 
+        {
+            let texture = self.index_chunks.entry(ssector.sector.ceil_tex.id().clone())
+                .or_insert_with(|| IndexChunk {
+                    texture: ssector.sector.ceil_tex.clone(),
+                    indices: Vec::new(),
+                });
+            // Ceiling textures need reversed indices because the triangles face the
+            // opposite direction
+            for idx in self.triangulation.indices.iter().rev() {
+                texture.indices.push(ceil_indices[*idx as usize]);
+            }
+        }
+    }
+
+    pub fn build(
+        self,
+        model_data: &mut MapModelData,
+    ) -> Result<Chunk, ChunkBuildError> {
         debug!(
             vertices = ?self.vertices.len(),
             "Building chunk"

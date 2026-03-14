@@ -57,9 +57,17 @@ impl Command for ChangeMapCommand {
         info!(?map_name, ?map, "Loaded map");
 
         let (chunk, map_model_data) = {
+            let map = map.read();
             let mut builder = Chunk::builder();
-            for linedef in map.read().linedefs().read().iter() {
+            for linedef in map.linedefs().read().iter() {
                 builder.add_linedef(&linedef);
+            }
+            {
+                let gl_nodes = map.gl_nodes().read();
+                let gl_vertices = gl_nodes.gl_vertices.read();
+                for ssector in &gl_nodes.gl_ssectors {
+                    builder.add_ssector(ssector, &gl_vertices);
+                }
             }
             let mut map_model_data = MapModelData::default();
             let chunk = Arc::new(builder.build(&mut map_model_data).unwrap());

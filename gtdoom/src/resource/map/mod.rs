@@ -75,6 +75,7 @@ pub struct Map {
     sidedefs: Arc<Resource<Sidedefs>>,
     #[educe(Debug(method(fmt_resource_buffer)))]
     linedefs: Arc<Resource<Linedefs>>,
+    #[educe(Debug(method(fmt_resource)))]
     gl_nodes: Arc<Resource<GlNodes>>,
 }
 
@@ -89,6 +90,11 @@ impl Map {
     #[inline]
     pub fn linedefs(&self) -> &Arc<Resource<Linedefs>> {
         &self.linedefs
+    }
+
+    #[inline]
+    pub fn gl_nodes(&self) -> &Arc<Resource<GlNodes>> {
+        &self.gl_nodes
     }
 }
 

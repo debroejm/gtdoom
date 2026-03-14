@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use educe::Educe;
 use gtether::render::Renderer;
 use gtether::resource::manager::ResourceLoadContext;
-use gtether::resource::{Resource, ResourceLoadError, ResourceLoader, ResourceLoaderDefault, ResourceReadData};
+use gtether::resource::{Resource, ResourceLoadError, ResourceLoader, ResourceLoaderDefault, ResourceLock, ResourceReadData};
 use smol::io::{AsyncRead, AsyncReadExt};
 use std::fmt;
 use std::fmt::{Display, Formatter};
@@ -76,39 +76,71 @@ pub struct GlVertices {
 }
 
 impl GlVertices {
+    #[inline]
+    pub fn read(&self) -> GlVerticesReadLock<'_> {
+        GlVerticesReadLock {
+            gl_vertices: self,
+            original_vertices: self.original_vertices.read(),
+        }
+    }
+}
+
+pub struct GlVerticesReadLock<'a> {
+    gl_vertices: &'a GlVertices,
+    original_vertices: ResourceLock<'a, Vertices>,
+}
+
+impl<'a> GlVerticesReadLock<'a> {
     pub fn contains_idx(&self, idx: u32) -> bool {
-        if idx < self.original_vertex_count {
-            (idx as usize) < self.original_vertices.read().len()
+        if idx < self.gl_vertices.original_vertex_count {
+            (idx as usize) < self.original_vertices.len()
         } else {
-            ((idx - self.original_vertex_count) as usize) < self.fixed_vertices.len()
+            ((idx - self.gl_vertices.original_vertex_count) as usize) < self.gl_vertices.fixed_vertices.len()
         }
     }
 
     pub fn get(&self, idx: u32) -> Option<GlIndexedVertex> {
-        if idx < self.original_vertex_count {
-            let v = *self.original_vertices.read().get(idx as usize)?;
+        if idx < self.gl_vertices.original_vertex_count {
+            let v = *self.original_vertices.get(idx as usize)?;
             Some(GlIndexedVertex::Vertex(IndexedVertex::new(v, idx as u16)))
         } else {
-            let fixed_idx = idx - self.original_vertex_count;
-            let v = *self.fixed_vertices.get(fixed_idx as usize)?;
+            let fixed_idx = idx - self.gl_vertices.original_vertex_count;
+            let v = *self.gl_vertices.fixed_vertices.get(fixed_idx as usize)?;
             Some(GlIndexedVertex::FixedVertex(IndexedFixedVertex::new(v, idx)))
         }
     }
 
-    fn get_index(&self, idx: u32) -> Option<GlVertexIndex> {
-        if idx < self.original_vertex_count {
-            if (idx as usize) < self.original_vertices.read().len() {
+    pub fn get_index(&self, idx: u32) -> Option<GlVertexIndex> {
+        if idx < self.gl_vertices.original_vertex_count {
+            if (idx as usize) < self.original_vertices.len() {
                 // TODO: check idx is below u16::MAX
                 Some(GlVertexIndex::Original(idx as u16))
             } else {
                 None
             }
         } else {
-            let idx = idx - self.original_vertex_count;
-            if (idx as usize) < self.fixed_vertices.len() {
+            let idx = idx - self.gl_vertices.original_vertex_count;
+            if (idx as usize) < self.gl_vertices.fixed_vertices.len() {
                 Some(GlVertexIndex::Fixed(idx))
             } else {
                 None
+            }
+        }
+    }
+
+    pub fn get_indexed(&self, idx: GlVertexIndex) -> Option<GlIndexedVertex> {
+        match idx {
+            GlVertexIndex::Original(idx) => {
+                if (idx as u32) < self.gl_vertices.original_vertex_count {
+                    let v = *self.original_vertices.get(idx as usize)?;
+                    Some(GlIndexedVertex::Vertex(IndexedVertex::new(v, idx)))
+                } else {
+                    None
+                }
+            },
+            GlVertexIndex::Fixed(idx) => {
+                let v = *self.gl_vertices.fixed_vertices.get(idx as usize)?;
+                Some(GlIndexedVertex::FixedVertex(IndexedFixedVertex::new(v, idx)))
             }
         }
     }
@@ -121,9 +153,9 @@ pub enum GlVertexIndex {
 }
 
 pub struct GlSeg {
-    vertex_idx: GlVertexIndex,
-    linedef: Option<IndexedArc<Linedef>>,
-    front: bool,
+    pub vertex_idx: GlVertexIndex,
+    pub linedef: Option<IndexedArc<Linedef>>,
+    pub front: bool,
 }
 
 impl GlSeg {
@@ -134,7 +166,7 @@ impl GlSeg {
 
     fn from_common_bytes(
         bytes: &[u8; Self::COMMON_BYTE_COUNT],
-        vertices: &GlVertices,
+        vertices: &GlVerticesReadLock,
     ) -> Result<GlVertexIndex, GlNodesLoadError> {
         let vertex_idx = {
             let idx = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
@@ -148,7 +180,7 @@ impl GlSeg {
 
     pub fn from_gln_bytes(
         bytes: &[u8; Self::GLN_BYTE_COUNT],
-        vertices: &GlVertices,
+        vertices: &GlVerticesReadLock,
         linedefs: &Linedefs,
     ) -> Result<Self, GlNodesLoadError> {
         let vertex_idx = Self::from_common_bytes(
@@ -176,7 +208,7 @@ impl GlSeg {
 
     pub fn from_gl2_bytes(
         bytes: &[u8; Self::GL2_BYTE_COUNT],
-        vertices: &GlVertices,
+        vertices: &GlVerticesReadLock,
         linedefs: &Linedefs,
     ) -> Result<Self, GlNodesLoadError> {
         let vertex_idx = Self::from_common_bytes(
@@ -205,7 +237,7 @@ impl GlSeg {
     #[inline]
     pub fn from_gl3_bytes(
         bytes: &[u8; Self::GL3_BYTE_COUNT],
-        vertices: &GlVertices,
+        vertices: &GlVerticesReadLock,
         linedefs: &Linedefs,
     ) -> Result<Self, GlNodesLoadError> {
         Self::from_gl2_bytes(bytes, vertices, linedefs)
@@ -215,9 +247,9 @@ impl GlSeg {
 #[derive(Educe)]
 #[educe(Debug)]
 pub struct GlSSector {
-    sector: IndexedArc<Sector>,
+    pub sector: IndexedArc<Sector>,
     #[educe(Debug(method(fmt_vec_len)))]
-    segs: Vec<GlSeg>,
+    pub segs: Vec<GlSeg>,
 }
 
 impl GlSSector {
@@ -264,6 +296,14 @@ impl GlSSector {
             sector,
             segs: gl_segs,
         })
+    }
+
+    pub fn contour(&self, gl_vertices: &GlVerticesReadLock) -> impl Iterator<Item=GlIndexedVertex> {
+        self.segs.iter()
+            .map(|seg| {
+                gl_vertices.get_indexed(seg.vertex_idx)
+                    .expect("seg vertex idx should be valid")
+            })
     }
 }
 
@@ -338,6 +378,7 @@ impl NodesMetadata {
 #[educe(Debug)]
 pub struct GlNodes {
     pub gl_vertices: GlVertices,
+    #[educe(Debug(method(fmt_vec_len)))]
     pub gl_ssectors: Vec<GlSSector>,
 }
 
@@ -403,6 +444,7 @@ impl GlNodes {
             let count = u32::from_le_bytes(header);
 
             let linedefs_lock = linedefs.read();
+            let gl_vertices_lock = gl_vertices.read();
             let mut gl_segs = Vec::with_capacity(count as usize);
             match metadata.nodes_t {
                 NodesType::ZDoomExtendedGl => {
@@ -411,7 +453,7 @@ impl GlNodes {
                         reader.read_exact(&mut bytes).await?;
                         gl_segs.push(GlSeg::from_gln_bytes(
                             &bytes,
-                            &gl_vertices,
+                            &gl_vertices_lock,
                             &linedefs_lock,
                         )?);
                     }
@@ -422,7 +464,7 @@ impl GlNodes {
                         reader.read_exact(&mut bytes).await?;
                         gl_segs.push(GlSeg::from_gl2_bytes(
                             &bytes,
-                            &gl_vertices,
+                            &gl_vertices_lock,
                             &linedefs_lock,
                         )?);
                     }
@@ -433,7 +475,7 @@ impl GlNodes {
                         reader.read_exact(&mut bytes).await?;
                         gl_segs.push(GlSeg::from_gl3_bytes(
                             &bytes,
-                            &gl_vertices,
+                            &gl_vertices_lock,
                             &linedefs_lock,
                         )?);
                     }
