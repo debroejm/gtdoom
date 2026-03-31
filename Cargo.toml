@@ -16,7 +16,7 @@ bitflags = "2.9"
 chrono = "0.4"
 cordic = "0.1.5"
 educe = "0.6"
-fixed = "1.30"
+fixed = { version = "1.30", features = ["num-traits"] }
 gtether = { version = "0.2.3", features = ["gui"] }
 image = "0.25"
 i_triangle = "0.36"

@@ -32,3 +32,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 vulkano = { workspace = true }
 vulkano-shaders = { workspace = true }
+
+[dev-dependencies]
+rstest = "0.26.1"
+test-log = { version = "0.2.19", features = ["trace"]}

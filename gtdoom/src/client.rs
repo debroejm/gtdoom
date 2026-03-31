@@ -26,12 +26,48 @@ use vulkano::format::Format;
 use vulkano::image::SampleCount;
 use vulkano::render_pass::{AttachmentDescription, AttachmentLoadOp, AttachmentStoreOp};
 
+use crate::geometry::line::Line;
 use crate::render::camera::{Camera, VP};
 use crate::resource::lump::{AddSourceCommand, ListSourcesCommand, LumpFile, MoveSourceCommand, RemoveSourceCommand};
+use crate::resource::map::blockmap::{Blockmap, BlockmapDimensions};
+use crate::resource::map::model::RENDER_CHUNK_SIZE;
 use crate::resource::map::model::{Chunk, MapModelData, MapRenderer};
+use crate::resource::map::vertex::{FixedFloat, FixedVertex};
 use crate::resource::map::Map;
 use crate::resource::patch::PatchViewLoader;
 use crate::WorkerPriority;
+
+#[cfg(debug_assertions)]
+fn contour_angle(contour: &[glm::TVec2<FixedFloat>]) -> FixedFloat {
+    const TWO: FixedFloat = FixedFloat::lit("2.0");
+
+    if contour.len() < 2 {
+        return FixedFloat::ZERO
+    }
+
+    let mut iter = contour.iter();
+    let first = iter.next().unwrap();
+    let second = iter.next().unwrap();
+
+    let mut total_angle = FixedFloat::ZERO;
+
+    let mut prev = second;
+    let mut prev_angle = cordic::atan2(second.y - first.y, second.x - first.x);
+    for next in iter.chain([first, second]) {
+        let next_angle = cordic::atan2(next.y - prev.y, next.x - prev.x);
+        let mut diff = prev_angle - next_angle;
+        if diff < -FixedFloat::PI {
+            diff += TWO * FixedFloat::PI;
+        } else if diff > FixedFloat::PI {
+            diff -= TWO * FixedFloat::PI;
+        }
+        total_angle += diff;
+        prev = next;
+        prev_angle = next_angle;
+    }
+
+    total_angle
+}
 
 #[derive(Educe)]
 #[educe(Debug)]
@@ -54,27 +90,68 @@ impl Command for ChangeMapCommand {
             .map_err(|e| CommandError::CommandFailure(Box::new(e)))?;
         info!(?map_name, ?map, "Loaded map");
 
-        let (chunk, map_model_data) = future::block_on(async {
+        let (chunks, map_model_data) = future::block_on(async {
             let map = map.read();
-            let mut builder = Chunk::builder(
-                self.resources.clone(),
-                self.window.renderer().clone(),
+
+            let map_bounds = {
+                let gl_nodes = map.gl_nodes().read();
+                let gl_vertices = gl_nodes.gl_vertices.read();
+                gl_vertices.calculate_bounds().map(|v| v.to_num::<i16>())
+            };
+            let block_dims = BlockmapDimensions::<RENDER_CHUNK_SIZE>::new(
+                map_bounds.min.cast(),
+                // Add +1 to size to force inclusive coverage of edges
+                (map_bounds.max - map_bounds.min).map(|v| v as u32 + 1),
             );
+            let builders = Blockmap::from_fn(
+                block_dims,
+                |_| Mutex::new(Chunk::builder(
+                    self.resources.clone(),
+                    self.window.renderer().clone(),
+                ))
+            );
+
             for linedef in map.linedefs().read().iter() {
-                builder.add_linedef(&linedef).await
-                    .map_err(|e| CommandError::CommandFailure(Box::new(e)))?;
+                let line = Line::<FixedFloat>::new(
+                    FixedVertex::from(linedef.start_vertex),
+                    FixedVertex::from(linedef.end_vertex),
+                );
+                for (builder, metadata) in builders.query(line) {
+                    builder.lock().add_linedef(&linedef, metadata.segment).await
+                        .map_err(|e| CommandError::CommandFailure(Box::new(e)))?;
+                }
             }
+
             {
                 let gl_nodes = map.gl_nodes().read();
                 let gl_vertices = gl_nodes.gl_vertices.read();
                 for ssector in &gl_nodes.gl_ssectors {
-                    builder.add_ssector(ssector, &gl_vertices);
+                    let contour = ssector.contour(&gl_vertices)
+                        .map(|v| *v.to_fixed().into_inner())
+                        .collect::<Vec<_>>();
+                    debug_assert!(
+                        contour_angle(&contour) > FixedFloat::ZERO,
+                        "CCW contour found: {contour:?}",
+                    );
+                    for (builder, metadata) in builders.query(contour) {
+                        let contour = metadata.contour.into_iter()
+                            .map(FixedVertex::from)
+                            .collect::<Vec<_>>();
+                        builder.lock().add_ssector(&ssector.sector, contour);
+                    }
                 }
             }
+
             let mut map_model_data = MapModelData::default();
-            let chunk = builder.build(&mut map_model_data).await
-                .map_err(|e| CommandError::CommandFailure(Box::new(e)))?;
-            Ok::<_, CommandError>((Arc::new(chunk), map_model_data))
+            let mut chunks = Vec::with_capacity(builders.dimensions().total_block_count());
+            for (_, builder) in builders.into_iter() {
+                let chunk = builder.into_inner().build(&mut map_model_data).await
+                    .map_err(|e| CommandError::CommandFailure(Box::new(e)))?;
+                chunks.push(chunk);
+            }
+            let chunks = Blockmap::from_parts(block_dims, chunks);
+
+            Ok::<_, CommandError>((Arc::new(chunks), map_model_data))
         })?;
         debug!(?map_name, "Parsed map model data");
 
@@ -99,7 +176,7 @@ impl Command for ChangeMapCommand {
             .color_attachment("color")
             .handler(move |renderer, subpass| MapRenderer::new(
                 renderer_camera,
-                chunk,
+                chunks,
                 map_model_data,
                 renderer,
                 subpass,

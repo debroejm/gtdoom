@@ -1,14 +1,14 @@
-use std::cmp::Ordering;
 use ahash::HashMap;
 use educe::Educe;
+use fixed::types::extra::U16;
+use fixed::FixedI64;
 use gtether::resource::Resource;
 use i_triangle::float::triangulatable::Triangulatable;
 use i_triangle::i_overlay::i_shape::base::data::{Contour, Shape as ContourShape};
 use std::sync::Arc;
-use fixed::FixedI64;
-use fixed::types::extra::U16;
 use tracing::warn;
 
+use crate::geometry::line::Line;
 use crate::resource::indexed::{IndexedArc, IndexedRef};
 use crate::resource::map::gl_node::{GlNodes, GlSSector, GlSeg, GlVertexIndex, GlVertices};
 use crate::resource::map::linedef::Linedef;
@@ -94,59 +94,6 @@ fn point_in_polygon(v: &FixedVertex, poly: &Contour<FixedVertex>) -> PointInPoly
         PointInPolygonResult::Inside
     } else {
         PointInPolygonResult::Outside
-    }
-}
-
-fn segment_in_segment(
-    s1v1: &FixedVertex,
-    s1v2: &FixedVertex,
-    s2v1: &FixedVertex,
-    s2v2: &FixedVertex,
-) -> bool {
-    let (s1v1, s1v2, s2v1, s2v2) = match (s1v1.x.cmp(&s1v2.x), s2v1.x.cmp(&s2v2.x)) {
-        // fix ordering of points
-        (Ordering::Less, Ordering::Less) => (s1v1, s1v2, s2v1, s2v2),
-        (Ordering::Less, Ordering::Greater) => (s1v1, s1v2, s2v2, s2v1),
-        (Ordering::Greater, Ordering::Less) => (s1v2, s1v1, s2v1, s2v2),
-        (Ordering::Greater, Ordering::Greater) => (s1v2, s1v1, s2v2, s2v1),
-
-        // both lines are vertical with infinite slopes, just check the y values
-        (Ordering::Equal, Ordering::Equal) => {
-            // fix ordering of points
-            let (s1v1, s1v2) = if s1v1.y <= s1v2.y {
-                (s1v1, s1v2)
-            } else {
-                (s1v2, s1v1)
-            };
-            let (s2v1, s2v2) = if s2v1.y <= s2v2.y {
-                (s2v1, s2v2)
-            } else {
-                (s2v2, s2v1)
-            };
-
-            // adjust the first segment's points by the epsilon to account for near equal segments
-            return (s1v1.y + VERTEX_EPSILON) >= s2v1.y && (s1v2.y - VERTEX_EPSILON) <= s2v2.y
-        },
-
-        // one line is vertical and the other isn't; not a segment in segment
-        (Ordering::Equal, _) | (_, Ordering::Equal) => return false,
-    };
-
-    fn slope_intercept(v1: &FixedVertex, v2: &FixedVertex) -> (FixedFloat, FixedFloat) {
-        let slope = (v2.y - v1.y) / (v2.x - v1.x);
-        let intercept = v1.y - (slope * v1.x);
-        (slope, intercept)
-    }
-
-    let (l1_slope, l1_intercept) = slope_intercept(s1v1, s1v2);
-    let (l2_slope, l2_intercept) = slope_intercept(s2v1, s2v2);
-    if (l2_slope - l1_slope).abs() < VERTEX_EPSILON
-        && (l2_intercept - l1_intercept).abs() < VERTEX_EPSILON {
-        // lines are the same, now check the first segment is in the bounds of the second
-        // adjust the first segment's points by the epsilon to account for near equal segments
-        (s1v1.x + VERTEX_EPSILON) >= s2v1.x && (s1v2.x - VERTEX_EPSILON) <= s2v2.x
-    } else {
-        false
     }
 }
 
@@ -364,12 +311,16 @@ impl GlSSectorBuilder {
             v1: &FixedVertex,
             v2: &FixedVertex,
         ) -> Option<(IndexedArc<Linedef>, bool)> {
+            let segment = Line {
+                a: (*v1).into(),
+                b: (*v2).into(),
+            };
             for (linedef, front) in linedefs {
-                if segment_in_segment(
-                    v1, v2,
-                    &FixedVertex::from(linedef.start_vertex),
-                    &FixedVertex::from(linedef.end_vertex),
-                ) {
+                let line = Line::<FixedFloat>::from_line(Line {
+                    a: linedef.start_vertex.into(),
+                    b: linedef.end_vertex.into(),
+                });
+                if line.contains_eps(&segment, VERTEX_EPSILON) {
                     return Some((linedef.clone(), *front))
                 }
             }
@@ -392,9 +343,13 @@ impl GlSSectorBuilder {
 
         let mut convex_contours = vec![];
         for contour_shape in contour_shapes {
-            let out = contour_shape.triangulate()
+            let mut out = contour_shape.triangulate()
                 .into_delaunay()
                 .to_convex_polygons();
+            for contour in &mut out {
+                // i_triangle outputs contour in CCW, but we need them to be CW
+                contour.reverse();
+            }
             convex_contours.extend(out);
         }
 

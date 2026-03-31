@@ -1,7 +1,7 @@
+pub mod blockmap;
 pub mod gl_node;
 pub mod linedef;
 pub mod model;
-pub mod quadtree;
 pub mod sector;
 pub mod sidedef;
 pub mod vertex;
@@ -79,6 +79,11 @@ pub struct Map {
 }
 
 impl Map {
+    #[inline]
+    pub fn vertices(&self) -> &Arc<Resource<Vertices>> {
+        &self.vertices
+    }
+
     #[inline]
     pub fn linedefs(&self) -> &Arc<Resource<Linedefs>> {
         &self.linedefs

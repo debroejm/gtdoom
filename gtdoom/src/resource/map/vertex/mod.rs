@@ -6,12 +6,13 @@ use i_triangle::i_overlay::i_float::float::compatible::FloatPointCompatible;
 use smol::io::{AsyncRead, AsyncReadExt};
 use tracing::debug;
 
+use crate::geometry::Aabb;
 use crate::resource::indexed::Indexed;
 
 mod _fixed;
 pub use _fixed::*;
 
-#[derive(Educe, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Educe, Debug, Clone, Copy, PartialEq, Eq, PartialOrd)]
 #[educe(Deref)]
 #[repr(transparent)]
 pub struct Vertex(glm::TVec2<i16>);
@@ -41,6 +42,13 @@ impl From<glm::TVec2<i16>> for Vertex {
     #[inline]
     fn from(value: glm::TVec2<i16>) -> Self {
         Self(value)
+    }
+}
+
+impl From<Vertex> for glm::TVec2<i16> {
+    #[inline]
+    fn from(value: Vertex) -> Self {
+        value.0
     }
 }
 
@@ -121,6 +129,10 @@ impl Vertices {
         }
         debug!(count = ?vertices.len(), "Loaded Vertices");
         Ok(Self(vertices))
+    }
+
+    pub fn calculate_bounds(&self) -> Aabb<i16> {
+        self.0.iter().map(|v| &**v).collect()
     }
 }
 

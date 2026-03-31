@@ -9,10 +9,11 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tracing::warn;
 
+use crate::geometry::Aabb;
 use crate::resource::indexed::IndexedArc;
 use crate::resource::map::linedef::{Linedef, Linedefs};
 use crate::resource::map::sector::Sector;
-use crate::resource::map::vertex::{FixedVertex, IndexedFixedVertex, IndexedVertex, Vertices};
+use crate::resource::map::vertex::{FixedFloat, FixedVertex, IndexedFixedVertex, IndexedVertex, Vertices};
 use crate::resource::map::{MapFormat, MapType};
 
 mod builder;
@@ -141,6 +142,20 @@ impl<'a> GlVerticesReadLock<'a> {
                 let v = *self.gl_vertices.fixed_vertices.get(idx as usize)?;
                 Some(GlIndexedVertex::FixedVertex(IndexedFixedVertex::new(v, idx)))
             }
+        }
+    }
+
+    pub fn calculate_bounds(&self) -> Aabb<FixedFloat> {
+        let original_bounds = self.original_vertices.calculate_bounds()
+            .map(FixedFloat::from);
+
+        if !self.gl_vertices.fixed_vertices.is_empty() {
+            let bounds = self.gl_vertices.fixed_vertices.iter()
+                .map(|v| &**v)
+                .collect::<Aabb<_>>();
+            bounds | original_bounds
+        } else {
+            original_bounds
         }
     }
 }

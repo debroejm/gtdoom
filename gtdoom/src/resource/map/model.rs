@@ -17,7 +17,7 @@ use std::fmt::{Debug, Formatter};
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
-use tracing::debug;
+use tracing::trace;
 use vulkano::buffer::{AllocateBufferError, Buffer, BufferContents, BufferCreateInfo, BufferUsage, IndexBuffer, Subbuffer};
 use vulkano::command_buffer::{AutoCommandBufferBuilder, PrimaryAutoCommandBuffer};
 use vulkano::image::sampler::{Filter, Sampler, SamplerAddressMode, SamplerCreateInfo};
@@ -34,14 +34,17 @@ use vulkano::pipeline::{GraphicsPipeline, Pipeline, PipelineBindPoint, PipelineL
 use vulkano::render_pass::Subpass;
 use vulkano::Validated;
 
+use crate::geometry::line::Line;
 use crate::render::camera::{Camera, VP};
-use crate::resource::map::gl_node::{GlSSector, GlVerticesReadLock};
+use crate::resource::map::blockmap::Blockmap;
 use crate::resource::map::linedef::{Linedef, LinedefFlags};
+use crate::resource::map::sector::Sector;
 use crate::resource::map::sidedef::{Sidedef, SidedefLocation};
-use crate::resource::map::vertex::FixedVertex;
+use crate::resource::map::vertex::{FixedFloat, FixedVertex};
 use crate::resource::texture::{Texture, TextureId};
 
 const MAP_VERTEX_EPSILON: f32 = 0.1;
+pub const RENDER_CHUNK_SIZE: u32 = 1024 * 16;
 pub type MapVertexIndex = u32;
 pub type MapTextureIndex = u32;
 
@@ -488,22 +491,25 @@ impl ChunkBuilder {
     pub async fn add_linedef(
         &mut self,
         linedef: &Linedef,
+        segment: Line<FixedFloat>,
     ) -> Result<(), ResourceLoadError> {
+        let start_vertex = FixedVertex::from(segment.a);
+        let end_vertex = FixedVertex::from(segment.b);
         match (&linedef.front_sidedef, &linedef.back_sidedef) {
             (Some(front), Some(back)) => {
                 // Lower
                 if front.sector.floor_height < back.sector.floor_height {
                     self.add_vertical_quad(
-                        linedef.start_vertex.to_3d(front.sector.floor_height as f32),
-                        linedef.end_vertex.to_3d(back.sector.floor_height as f32),
+                        start_vertex.to_3d(front.sector.floor_height as f32),
+                        end_vertex.to_3d(back.sector.floor_height as f32),
                         linedef,
                         front,
                         SidedefLocation::Lower,
                     ).await?;
                 } else if front.sector.floor_height > back.sector.floor_height {
                     self.add_vertical_quad(
-                        linedef.end_vertex.to_3d(back.sector.floor_height as f32),
-                        linedef.start_vertex.to_3d(front.sector.floor_height as f32),
+                        end_vertex.to_3d(back.sector.floor_height as f32),
+                        start_vertex.to_3d(front.sector.floor_height as f32),
                         linedef,
                         back,
                         SidedefLocation::Lower,
@@ -513,16 +519,16 @@ impl ChunkBuilder {
                 // Upper
                 if front.sector.ceil_height > back.sector.ceil_height {
                     self.add_vertical_quad(
-                        linedef.start_vertex.to_3d(back.sector.ceil_height as f32),
-                        linedef.end_vertex.to_3d(front.sector.ceil_height as f32),
+                        start_vertex.to_3d(back.sector.ceil_height as f32),
+                        end_vertex.to_3d(front.sector.ceil_height as f32),
                         linedef,
                         front,
                         SidedefLocation::Upper,
                     ).await?;
                 } else if front.sector.ceil_height < back.sector.ceil_height {
                     self.add_vertical_quad(
-                        linedef.end_vertex.to_3d(front.sector.ceil_height as f32),
-                        linedef.start_vertex.to_3d(back.sector.ceil_height as f32),
+                        end_vertex.to_3d(front.sector.ceil_height as f32),
+                        start_vertex.to_3d(back.sector.ceil_height as f32),
                         linedef,
                         back,
                         SidedefLocation::Upper,
@@ -534,8 +540,8 @@ impl ChunkBuilder {
             (Some(front), None) => {
                 // Middle
                 self.add_vertical_quad(
-                    linedef.start_vertex.to_3d(front.sector.floor_height as f32),
-                    linedef.end_vertex.to_3d(front.sector.ceil_height as f32),
+                    start_vertex.to_3d(front.sector.floor_height as f32),
+                    end_vertex.to_3d(front.sector.ceil_height as f32),
                     linedef,
                     front,
                     SidedefLocation::Middle,
@@ -544,8 +550,8 @@ impl ChunkBuilder {
             (None, Some(back)) => {
                 // Middle
                 self.add_vertical_quad(
-                    linedef.end_vertex.to_3d(back.sector.floor_height as f32),
-                    linedef.start_vertex.to_3d(back.sector.ceil_height as f32),
+                    end_vertex.to_3d(back.sector.floor_height as f32),
+                    start_vertex.to_3d(back.sector.ceil_height as f32),
                     linedef,
                     back,
                     SidedefLocation::Middle,
@@ -556,25 +562,22 @@ impl ChunkBuilder {
         Ok(())
     }
 
-    pub fn add_ssector(&mut self, ssector: &GlSSector, gl_vertices: &GlVerticesReadLock) {
-        let light = ssector.sector.light_level as f32 / 255.0;
-        let tag = ssector.sector.tag;
+    pub fn add_ssector(&mut self, sector: &Sector, contour: Vec<FixedVertex>) {
+        let light = sector.light_level as f32 / 255.0;
+        let tag = sector.tag;
 
-        let points = ssector.contour(gl_vertices)
-            .map(|indexed| indexed.to_fixed().into_inner())
-            .collect::<Vec<_>>();
-        self.triangulator.triangulate_into(&points, &mut self.triangulation);
+        self.triangulator.triangulate_into(&contour, &mut self.triangulation);
 
         let (floor_indices, ceil_indices): (Vec<_>, Vec<_>) = self.triangulation.points.iter()
             .map(|v| {
                 // Floor/Ceil flat texture UVs are based off of a global grid of 64x64 flats
                 let uv = glm::vec2(f32::lossy_from(v.x) / 64.0, f32::lossy_from(v.y) / 64.0);
                 let floor_idx = self.vertices.get_or_insert(MapVertex {
-                    position: v.to_3d(ssector.sector.floor_height as f32),
+                    position: v.to_3d(sector.floor_height as f32),
                     uv, light, tag,
                 });
                 let ceil_idx = self.vertices.get_or_insert(MapVertex {
-                    position: v.to_3d(ssector.sector.ceil_height as f32),
+                    position: v.to_3d(sector.ceil_height as f32),
                     uv, light, tag,
                 });
                 (floor_idx, ceil_idx)
@@ -582,10 +585,10 @@ impl ChunkBuilder {
             .unzip();
 
         {
-            self.textures.register(ssector.sector.floor_tex);
-            let index_chunk = self.index_chunks.entry(ssector.sector.floor_tex)
+            self.textures.register(sector.floor_tex);
+            let index_chunk = self.index_chunks.entry(sector.floor_tex)
                 .or_insert_with(|| IndexChunk {
-                    texture_id: ssector.sector.floor_tex,
+                    texture_id: sector.floor_tex,
                     indices: Vec::new(),
                 });
             for idx in self.triangulation.indices.iter() {
@@ -594,10 +597,10 @@ impl ChunkBuilder {
         }
 
         {
-            self.textures.register(ssector.sector.ceil_tex);
-            let index_chunk = self.index_chunks.entry(ssector.sector.ceil_tex)
+            self.textures.register(sector.ceil_tex);
+            let index_chunk = self.index_chunks.entry(sector.ceil_tex)
                 .or_insert_with(|| IndexChunk {
-                    texture_id: ssector.sector.ceil_tex,
+                    texture_id: sector.ceil_tex,
                     indices: Vec::new(),
                 });
             // Ceiling textures need reversed indices because the triangles face the
@@ -612,7 +615,7 @@ impl ChunkBuilder {
         self,
         model_data: &mut MapModelData,
     ) -> Result<Chunk, ChunkBuildError> {
-        debug!(
+        trace!(
             vertices = ?self.vertices.len(),
             "Building chunk"
         );
@@ -741,7 +744,7 @@ mod shaders {
 }
 
 pub struct MapRenderer {
-    chunk: Arc<Chunk>,
+    chunks: Arc<Blockmap<RENDER_CHUNK_SIZE, Chunk>>,
     graphics: Arc<EngineGraphicsPipeline>,
     descriptor_set_0: EngineDescriptorSet,
     descriptor_set_1: EngineDescriptorSet,
@@ -752,7 +755,7 @@ pub struct MapRenderer {
 impl MapRenderer {
     pub fn new(
         camera: Arc<Uniform<VP, Camera>>,
-        chunk: Arc<Chunk>,
+        chunks: Arc<Blockmap<RENDER_CHUNK_SIZE, Chunk>>,
         model_data: MapModelData,
         renderer: &Arc<Renderer>,
         subpass: &Subpass,
@@ -844,7 +847,7 @@ impl MapRenderer {
         let index_buffer = model_data.vertex_indices.into_index_buffer(renderer.device())?;
 
         Ok(Self {
-            chunk,
+            chunks,
             graphics,
             descriptor_set_0,
             descriptor_set_1,
@@ -877,7 +880,9 @@ impl EngineRenderHandler for MapRenderer {
             ).unwrap()
             .bind_vertex_buffers(0, self.vertex_buffer.clone()).unwrap()
             .bind_index_buffer(self.index_buffer.clone()).unwrap();
-        self.chunk.draw(&graphics, builder);
+        for chunk in self.chunks.values() {
+            chunk.draw(&graphics, builder);
+        }
 
         Ok(())
     }

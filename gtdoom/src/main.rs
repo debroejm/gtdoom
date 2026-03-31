@@ -1,15 +1,15 @@
 extern crate nalgebra_glm as glm;
 
-use std::num::NonZeroUsize;
 use gtether::console::log::ConsoleLogLayer;
 use gtether::gui::window::winit::WinitDriver;
 use gtether::net::driver::NoNetDriver;
 use gtether::resource::manager::{ResourceManager, ResourceManagerWorkerPriorityConfig};
 use gtether::resource::source::constant::ConstantResourceSource;
 use gtether::resource::source::fs::ResourceSourceFiles;
-use gtether::EngineBuilder;
 use gtether::worker::WorkerPool;
+use gtether::EngineBuilder;
 use smol::future;
+use std::num::NonZeroUsize;
 use tracing::info;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::EnvFilter;
@@ -18,6 +18,7 @@ use crate::client::GtdoomClient;
 use crate::resource::lump::LumpFile;
 
 mod client;
+mod geometry;
 mod render;
 mod resource;
 

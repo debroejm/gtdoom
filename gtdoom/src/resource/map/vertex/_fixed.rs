@@ -72,6 +72,20 @@ impl TryFrom<FixedVertex> for Vertex {
     }
 }
 
+impl From<FixedVertex> for glm::TVec2<FixedFloat> {
+    #[inline]
+    fn from(value: FixedVertex) -> Self {
+        value.0
+    }
+}
+
+impl From<glm::TVec2<FixedFloat>> for FixedVertex {
+    #[inline]
+    fn from(value: glm::TVec2<FixedFloat>) -> Self {
+        Self(value)
+    }
+}
+
 type FixedFloatWrapperInner = FixedI64<U32>;
 
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
