@@ -30,7 +30,7 @@ use vulkano::pipeline::graphics::rasterization::{CullMode, RasterizationState};
 use vulkano::pipeline::graphics::vertex_input::{Vertex as VkVertex, VertexDefinition};
 use vulkano::pipeline::graphics::GraphicsPipelineCreateInfo;
 use vulkano::pipeline::layout::PipelineDescriptorSetLayoutCreateInfo;
-use vulkano::pipeline::{GraphicsPipeline, Pipeline, PipelineBindPoint, PipelineLayout, PipelineShaderStageCreateInfo};
+use vulkano::pipeline::{Pipeline, PipelineBindPoint, PipelineLayout, PipelineShaderStageCreateInfo};
 use vulkano::render_pass::Subpass;
 use vulkano::Validated;
 
@@ -46,7 +46,7 @@ use crate::resource::texture::{Texture, TextureId};
 const MAP_VERTEX_EPSILON: f32 = 0.1;
 pub const RENDER_CHUNK_SIZE: u32 = 1024 * 16;
 pub type MapVertexIndex = u32;
-pub type MapTextureIndex = u32;
+pub type MapTextureIndex = u16;
 
 #[derive(BufferContents, VkVertex, Debug, Clone, Copy, PartialEq)]
 #[repr(C)]
@@ -59,6 +59,8 @@ pub struct MapVertex {
     light: f32,
     #[format(R16_UINT)]
     tag: u16,
+    #[format(R16_UINT)]
+    tex_id: u16,
 }
 
 impl MapVertex {
@@ -114,6 +116,12 @@ impl MapVertices {
             let idx = self.0.len();
             self.0.push(vertex);
             idx as MapVertexIndex
+        }
+    }
+
+    pub fn adjust_texture_indices(&mut self, remap: &Vec<MapTextureIndex>) {
+        for vertex in &mut self.0 {
+            vertex.tex_id = remap[vertex.tex_id as usize];
         }
     }
 
@@ -268,18 +276,29 @@ impl TextureLoadMap {
         }
     }
 
-    async fn get(&mut self, texture_id: TextureId) -> ResourceLoadResult<Texture> {
+    fn get_index(
+        &mut self,
+        texture_id: TextureId,
+    ) -> MapTextureIndex {
         self.register(texture_id);
-        let idx = self.index_map[&texture_id];
+        self.index_map[&texture_id]
+    }
+
+    async fn get(
+        &mut self,
+        texture_id: TextureId,
+    ) -> Result<(MapTextureIndex, Arc<Resource<Texture>>), ResourceLoadError> {
+        let idx = self.get_index(texture_id);
         let entry = &mut self.entries[idx as usize];
-        match &mut entry.status {
+        let result = match &mut entry.status {
             TextureLoadMapStatus::Loading(fut) => {
                 let result = fut.await;
                 entry.status = TextureLoadMapStatus::Loaded(result.clone());
                 result
             },
             TextureLoadMapStatus::Loaded(result) => result.clone(),
-        }
+        };
+        result.map(|tex| (idx, tex))
     }
 }
 
@@ -300,17 +319,6 @@ impl Debug for MapTextures {
 }
 
 impl MapTextures {
-    /*#[inline]
-    pub fn get_or_insert(&mut self, texture: &Arc<Resource<Texture>>) -> MapTextureIndex {
-        if let Some(idx) = self.index_map.get(texture.id()) {
-            *idx
-        } else {
-            let idx = self.textures.len() as MapTextureIndex;
-            self.index_map.insert(texture.id().clone(), idx);
-            self.textures.push(texture.clone());
-            idx
-        }
-    }*/
     #[inline]
     pub fn get_index(&self, texture_id: TextureId) -> Option<MapTextureIndex> {
         self.index_map.get(&texture_id).cloned()
@@ -324,9 +332,12 @@ impl MapTextures {
     async fn extend_from_load_map(
         &mut self,
         load_map: TextureLoadMap,
-    ) -> Result<(), ResourceLoadError> {
+    ) -> Result<Vec<MapTextureIndex>, ResourceLoadError> {
+        let mut remap = vec![];
         for entry in load_map.entries {
-            if !self.index_map.contains_key(&entry.id) {
+            if let Some(idx) = self.index_map.get(&entry.id) {
+                remap.push(*idx);
+            } else {
                 let idx = self.textures.len() as MapTextureIndex;
                 let texture = match entry.status {
                     TextureLoadMapStatus::Loading(fut) => fut.await?,
@@ -334,9 +345,10 @@ impl MapTextures {
                 };
                 self.textures.push(texture);
                 self.index_map.insert(entry.id, idx);
+                remap.push(idx);
             }
         }
-        Ok(())
+        Ok(remap)
     }
 
     #[inline]
@@ -352,15 +364,10 @@ pub struct MapModelData {
     pub textures: MapTextures,
 }
 
-struct IndexChunk {
-    texture_id: TextureId,
-    indices: Vec<MapVertexIndex>,
-}
-
 pub struct ChunkBuilder {
     vertices: MapVertices,
     textures: TextureLoadMap,
-    index_chunks: HashMap<TextureId, IndexChunk>,
+    indices: Vec<MapVertexIndex>,
     triangulator: Triangulator<MapVertexIndex>,
     triangulation: Triangulation<FixedVertex, MapVertexIndex>,
 }
@@ -387,7 +394,7 @@ impl ChunkBuilder {
         Self {
             vertices: MapVertices::default(),
             textures,
-            index_chunks: HashMap::default(),
+            indices: vec![],
             triangulator,
             triangulation,
         }
@@ -409,11 +416,11 @@ impl ChunkBuilder {
             let uv_offset = sidedef.offset(location);
             let uv_scale = sidedef.scale(location);
 
-            let tex_size = {
+            let (tex_id, tex_size) = {
                 // TODO: load textures in the background
-                let texture = self.textures.get(texture_id).await?;
+                let (tex_id, texture) = self.textures.get(texture_id).await?;
                 let tex_lock = texture.read();
-                glm::vec2(tex_lock.size.x as f32, tex_lock.size.y as f32)
+                (tex_id, glm::vec2(tex_lock.size.x as f32, tex_lock.size.y as f32))
             };
 
             // Normalize the offset
@@ -456,32 +463,31 @@ impl ChunkBuilder {
                 uv: uv_a,
                 light,
                 tag,
+                tex_id,
             });
             let i_b = self.vertices.get_or_insert(MapVertex {
                 position: b,
                 uv: uv_b,
                 light,
                 tag,
+                tex_id,
             });
             let i_c = self.vertices.get_or_insert(MapVertex {
                 position: glm::vec3(a.x, a.y, b.z),
                 uv: glm::vec2(uv_a.x, uv_b.y),
                 light,
                 tag,
+                tex_id,
             });
             let i_d = self.vertices.get_or_insert(MapVertex {
                 position: glm::vec3(b.x, b.y, a.z),
                 uv: glm::vec2(uv_b.x, uv_a.y),
                 light,
                 tag,
+                tex_id,
             });
 
-            let index_chunk = self.index_chunks.entry(texture_id)
-                .or_insert_with(|| IndexChunk {
-                    texture_id,
-                    indices: Vec::new(),
-                });
-            index_chunk.indices.extend_from_slice(&[i_a, i_b, i_c, i_a, i_d, i_b]);
+            self.indices.extend([i_a, i_b, i_c, i_a, i_d, i_b]);
             Ok(())
         } else {
             Err(ResourceLoadError::from(format!("Missing texture for quad (a={a:?}, b={b:?})")))
@@ -566,6 +572,9 @@ impl ChunkBuilder {
         let light = sector.light_level as f32 / 255.0;
         let tag = sector.tag;
 
+        let floor_tex_id = self.textures.get_index(sector.floor_tex);
+        let ceil_tex_id = self.textures.get_index(sector.ceil_tex);
+
         self.triangulator.triangulate_into(&contour, &mut self.triangulation);
 
         let (floor_indices, ceil_indices): (Vec<_>, Vec<_>) = self.triangulation.points.iter()
@@ -575,39 +584,24 @@ impl ChunkBuilder {
                 let floor_idx = self.vertices.get_or_insert(MapVertex {
                     position: v.to_3d(sector.floor_height as f32),
                     uv, light, tag,
+                    tex_id: floor_tex_id,
                 });
                 let ceil_idx = self.vertices.get_or_insert(MapVertex {
                     position: v.to_3d(sector.ceil_height as f32),
                     uv, light, tag,
+                    tex_id: ceil_tex_id,
                 });
                 (floor_idx, ceil_idx)
             })
             .unzip();
 
-        {
-            self.textures.register(sector.floor_tex);
-            let index_chunk = self.index_chunks.entry(sector.floor_tex)
-                .or_insert_with(|| IndexChunk {
-                    texture_id: sector.floor_tex,
-                    indices: Vec::new(),
-                });
-            for idx in self.triangulation.indices.iter() {
-                index_chunk.indices.push(floor_indices[*idx as usize]);
-            }
+        for idx in self.triangulation.indices.iter() {
+            self.indices.push(floor_indices[*idx as usize]);
         }
-
-        {
-            self.textures.register(sector.ceil_tex);
-            let index_chunk = self.index_chunks.entry(sector.ceil_tex)
-                .or_insert_with(|| IndexChunk {
-                    texture_id: sector.ceil_tex,
-                    indices: Vec::new(),
-                });
-            // Ceiling textures need reversed indices because the triangles face the
-            // opposite direction
-            for idx in self.triangulation.indices.iter().rev() {
-                index_chunk.indices.push(ceil_indices[*idx as usize]);
-            }
+        // Ceiling textures need reversed indices because the triangles face the
+        // opposite direction
+        for idx in self.triangulation.indices.iter().rev() {
+            self.indices.push(ceil_indices[*idx as usize]);
         }
     }
 
@@ -620,46 +614,28 @@ impl ChunkBuilder {
             "Building chunk"
         );
 
-        let vertex_index_remap = model_data.vertices.extend(self.vertices);
-        model_data.textures.extend_from_load_map(self.textures).await?;
+        let tex_index_remap = model_data.textures.extend_from_load_map(self.textures).await?;
+        let mut vertices = self.vertices;
+        vertices.adjust_texture_indices(&tex_index_remap);
+        let vertex_index_remap = model_data.vertices.extend(vertices);
 
-        let mut index_segments = Vec::with_capacity(self.index_chunks.len());
-        for chunk_tex in self.index_chunks.values() {
-            let texture_index = model_data.textures.get_index(chunk_tex.texture_id)
-                .expect("texture should be registered");
-            let first_index = model_data.vertex_indices.len() as MapVertexIndex;
-            let index_count = chunk_tex.indices.len() as u32;
-            model_data.vertex_indices.extend(chunk_tex.indices.iter()
-                .map(|idx| vertex_index_remap[(*idx) as usize]));
-            index_segments.push(ChunkIndexSegment {
-                texture_index,
-                first_index,
-                index_count,
-            });
-        }
+        let first_index = model_data.vertex_indices.len() as MapVertexIndex;
+        let index_count = self.indices.len() as u32;
+        model_data.vertex_indices.extend(
+            self.indices.into_iter()
+                .map(|idx| vertex_index_remap[idx as usize])
+        );
 
         Ok(Chunk {
-            index_segments,
+            first_index,
+            index_count,
         })
     }
 }
 
-struct ChunkIndexSegment {
-    texture_index: MapTextureIndex,
+pub struct Chunk {
     first_index: MapVertexIndex,
     index_count: u32,
-}
-
-impl ChunkIndexSegment {
-    fn to_pc(&self) -> shaders::frag::PCData {
-        shaders::frag::PCData {
-            tex_id: self.texture_index,
-        }
-    }
-}
-
-pub struct Chunk {
-    index_segments: Vec<ChunkIndexSegment>,
 }
 
 impl Chunk {
@@ -673,13 +649,17 @@ impl Chunk {
 
     pub fn draw(
         &self,
-        graphics: &Arc<GraphicsPipeline>,
         builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
     ) {
-        for segment in &self.index_segments {
+        if self.index_count > 0 {
             builder
-                .push_constants(graphics.layout().clone(), 0, segment.to_pc()).unwrap()
-                .draw_indexed(segment.index_count, 1, segment.first_index, 0, 0).unwrap();
+                .draw_indexed(
+                    self.index_count,
+                    1,
+                    self.first_index,
+                    0,
+                    0,
+                ).unwrap();
         }
     }
 }
@@ -695,10 +675,11 @@ mod shaders {
                 layout(location = 1) in vec2 uv;
                 layout(location = 2) in float light;
                 layout(location = 3) in uint tag;
+                layout(location = 4) in uint tex_id;
 
                 layout(location = 0) out vec2 tex_coords;
                 layout(location = 1) out float out_light;
-                layout(location = 2) out float testval;
+                layout(location = 2) flat out uint out_tex_id;
 
                 layout(set = 0, binding = 0) uniform VP_Data {
                     mat4 vp;
@@ -708,7 +689,7 @@ mod shaders {
                     gl_Position = vp.vp * vec4(position, 1.0);
                     tex_coords = uv;
                     out_light = light;
-                    testval = gl_Position.z;
+                    out_tex_id = tex_id;
                 }
             ",
         }
@@ -723,20 +704,15 @@ mod shaders {
 
                 layout(location = 0) in vec2 tex_coords;
                 layout(location = 1) in float light;
-                layout(location = 2) in float testval;
+                layout(location = 2) flat in uint tex_id;
                 layout(location = 0) out vec4 f_color;
-
-                layout(push_constant) uniform PCData {
-                    uint tex_id;
-                } pc;
 
                 layout(set = 1, binding = 0) uniform sampler s;
                 layout(set = 1, binding = 1) uniform texture2D tex[];
 
                 void main() {
-                    vec4 color = texture(sampler2D(tex[nonuniformEXT(pc.tex_id)], s), tex_coords);
+                    vec4 color = texture(sampler2D(tex[nonuniformEXT(tex_id)], s), tex_coords);
                     f_color = vec4(color.xyz * light, color.w);
-                    //f_color = vec4(0.0, 0.0, testval, 1.0);
                 }
             ",
         }
@@ -881,7 +857,7 @@ impl EngineRenderHandler for MapRenderer {
             .bind_vertex_buffers(0, self.vertex_buffer.clone()).unwrap()
             .bind_index_buffer(self.index_buffer.clone()).unwrap();
         for chunk in self.chunks.values() {
-            chunk.draw(&graphics, builder);
+            chunk.draw(builder);
         }
 
         Ok(())
