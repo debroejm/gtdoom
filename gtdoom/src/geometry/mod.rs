@@ -4,6 +4,9 @@ use std::fmt::Debug;
 use std::iter::FusedIterator;
 use std::ops::{BitOr, BitOrAssign, Neg};
 
+#[cfg(debug_assertions)]
+use crate::resource::map::vertex::FixedFloat;
+
 pub mod line;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -269,4 +272,40 @@ impl<N: Scalar + PartialOrd + Bounded> FromIterator<glm::TVec2<N>> for Aabb<N> {
         debug_assert!(aabb.min < aabb.max);
         aabb
     }
+}
+
+#[cfg(debug_assertions)]
+pub fn contour_angle<'a>(
+    contour: impl IntoIterator<Item=&'a glm::TVec2<FixedFloat>>,
+) -> FixedFloat {
+    const TWO: FixedFloat = FixedFloat::lit("2.0");
+
+    let mut iter = contour.into_iter();
+    let first = match iter.next() {
+        Some(v) => v,
+        None => return FixedFloat::ZERO
+    };
+    let second = match iter.next() {
+        Some(v) => v,
+        None => return FixedFloat::ZERO
+    };
+
+    let mut total_angle = FixedFloat::ZERO;
+
+    let mut prev = second;
+    let mut prev_angle = cordic::atan2(second.y - first.y, second.x - first.x);
+    for next in iter.chain([first, second]) {
+        let next_angle = cordic::atan2(next.y - prev.y, next.x - prev.x);
+        let mut diff = prev_angle - next_angle;
+        if diff < -FixedFloat::PI {
+            diff += TWO * FixedFloat::PI;
+        } else if diff > FixedFloat::PI {
+            diff -= TWO * FixedFloat::PI;
+        }
+        total_angle += diff;
+        prev = next;
+        prev_angle = next_angle;
+    }
+
+    total_angle
 }

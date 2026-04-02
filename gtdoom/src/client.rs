@@ -37,38 +37,6 @@ use crate::resource::map::Map;
 use crate::resource::patch::PatchViewLoader;
 use crate::WorkerPriority;
 
-#[cfg(debug_assertions)]
-fn contour_angle(contour: &[glm::TVec2<FixedFloat>]) -> FixedFloat {
-    const TWO: FixedFloat = FixedFloat::lit("2.0");
-
-    if contour.len() < 2 {
-        return FixedFloat::ZERO
-    }
-
-    let mut iter = contour.iter();
-    let first = iter.next().unwrap();
-    let second = iter.next().unwrap();
-
-    let mut total_angle = FixedFloat::ZERO;
-
-    let mut prev = second;
-    let mut prev_angle = cordic::atan2(second.y - first.y, second.x - first.x);
-    for next in iter.chain([first, second]) {
-        let next_angle = cordic::atan2(next.y - prev.y, next.x - prev.x);
-        let mut diff = prev_angle - next_angle;
-        if diff < -FixedFloat::PI {
-            diff += TWO * FixedFloat::PI;
-        } else if diff > FixedFloat::PI {
-            diff -= TWO * FixedFloat::PI;
-        }
-        total_angle += diff;
-        prev = next;
-        prev_angle = next_angle;
-    }
-
-    total_angle
-}
-
 #[derive(Educe)]
 #[educe(Debug)]
 struct ChangeMapCommand {
@@ -130,7 +98,7 @@ impl Command for ChangeMapCommand {
                         .map(|v| *v.to_fixed().into_inner())
                         .collect::<Vec<_>>();
                     debug_assert!(
-                        contour_angle(&contour) > FixedFloat::ZERO,
+                        crate::geometry::contour_angle(&contour) > FixedFloat::ZERO,
                         "CCW contour found: {contour:?}",
                     );
                     for (builder, metadata) in builders.query(contour) {

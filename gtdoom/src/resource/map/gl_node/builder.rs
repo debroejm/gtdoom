@@ -143,8 +143,16 @@ impl NestedCompound {
 
     fn into_contour_shapes(self, output: &mut Vec<ContourShape<FixedVertex>>) {
         let mut contour_shape = ContourShape::with_capacity(1 + self.sub_shapes.len());
+        debug_assert!(
+            crate::geometry::contour_angle(self.contour.iter().map(|v| &**v)) < FixedFloat::ZERO,
+            "CW contour found (should be CCW): {:?}", &self.contour,
+        );
         contour_shape.push(self.contour);
         for hole in self.sub_shapes {
+            debug_assert!(
+                crate::geometry::contour_angle(hole.contour.iter().map(|v| &**v)) > FixedFloat::ZERO,
+                "CCW contour found (should be CW): {:?}", &hole.contour,
+            );
             contour_shape.push(hole.contour);
             // Double-nested contours are their own top-level shape again
             for sub_shape in hole.sub_shapes {
@@ -176,12 +184,19 @@ impl GlSSectorBuilder {
         closed_shapes: &mut Vec<NestedCompound>,
         closed_contour: Contour<FixedVertex>,
     ) {
-        let new_shape = NestedCompound::new(closed_contour);
+        let mut new_shape = NestedCompound::new(closed_contour);
         for closed_shape in closed_shapes.iter_mut() {
             if closed_shape.contains(&new_shape) {
                 closed_shape.insert_sub_shape(new_shape);
                 return
             }
+        }
+        let inner_shapes = closed_shapes.extract_if(
+            ..,
+            |closed_shape| new_shape.contains(closed_shape),
+        ).collect::<Vec<_>>();
+        for shape in inner_shapes {
+            new_shape.insert_sub_shape(shape);
         }
         closed_shapes.push(new_shape);
     }
@@ -244,31 +259,31 @@ impl GlSSectorBuilder {
     fn add_linedef(&mut self, linedef: IndexedRef<Linedef>) {
         let front_idx = linedef.front_sidedef.as_ref().map(|front| front.sector.idx);
         let back_idx = linedef.back_sidedef.as_ref().map(|back| back.sector.idx);
+        // Linedefs travel CW around sectors for the front side, and CCW for the back side.
+        // Contours need to be created in CCW order for outer sectors, and CW order for holes
         match (front_idx, back_idx) {
             (Some(front_idx), Some(back_idx)) => {
                 if front_idx == self.parent_sector.idx {
                     if back_idx == self.parent_sector.idx {
                         // Linedef is completely inside the sector, ignore for building geometry
                     } else {
-                        self.add_line(linedef.start_vertex.into(), linedef.end_vertex.into());
+                        self.add_line(linedef.end_vertex.into(), linedef.start_vertex.into());
                         self.linedefs.push((linedef.to_arc(), true));
                     }
                 } else if back_idx == self.parent_sector.idx {
-                    // Flip the vertices for easy matching
-                    self.add_line(linedef.end_vertex.into(), linedef.start_vertex.into());
+                    self.add_line(linedef.start_vertex.into(), linedef.end_vertex.into());
                     self.linedefs.push((linedef.to_arc(), false));
                 }
             },
             (Some(front_idx), None) => {
                 if front_idx == self.parent_sector.idx {
-                    self.add_line(linedef.start_vertex.into(), linedef.end_vertex.into());
+                    self.add_line(linedef.end_vertex.into(), linedef.start_vertex.into());
                     self.linedefs.push((linedef.to_arc(), true));
                 }
             },
             (None, Some(back_idx)) => {
                 if back_idx == self.parent_sector.idx {
-                    // Flip the vertices for easy matching
-                    self.add_line(linedef.end_vertex.into(), linedef.start_vertex.into());
+                    self.add_line(linedef.start_vertex.into(), linedef.end_vertex.into());
                     self.linedefs.push((linedef.to_arc(), false));
                 }
             },
