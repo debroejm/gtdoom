@@ -43,6 +43,13 @@ impl FixedVertex {
     }
 }
 
+impl AsRef<glm::TVec2<FixedFloat>> for FixedVertex {
+    #[inline]
+    fn as_ref(&self) -> &glm::TVec2<FixedFloat> {
+        &self.0
+    }
+}
+
 impl From<Vertex> for FixedVertex {
     #[inline]
     fn from(value: Vertex) -> Self {

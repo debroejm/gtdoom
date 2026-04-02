@@ -38,6 +38,13 @@ impl Vertex {
     }
 }
 
+impl AsRef<glm::TVec2<i16>> for Vertex {
+    #[inline]
+    fn as_ref(&self) -> &glm::TVec2<i16> {
+        &self.0
+    }
+}
+
 impl From<glm::TVec2<i16>> for Vertex {
     #[inline]
     fn from(value: glm::TVec2<i16>) -> Self {
@@ -64,6 +71,13 @@ impl FloatVertex {
     pub fn equal_eps(&self, other: &FloatVertex, epsilon: f32) -> bool {
         let b = glm::equal_eps(self, other, epsilon);
         b.x && b.y
+    }
+}
+
+impl AsRef<glm::TVec2<f32>> for FloatVertex {
+    #[inline]
+    fn as_ref(&self) -> &glm::TVec2<f32> {
+        &self.0
     }
 }
 
