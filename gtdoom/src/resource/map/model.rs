@@ -16,7 +16,8 @@ use smol::future::FutureExt;
 use std::fmt::{Debug, Formatter};
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
+use parking_lot::RwLock;
 use tracing::trace;
 use vulkano::buffer::{AllocateBufferError, Buffer, BufferContents, BufferCreateInfo, BufferUsage, IndexBuffer, Subbuffer};
 use vulkano::command_buffer::{AutoCommandBufferBuilder, PrimaryAutoCommandBuffer};
@@ -33,7 +34,7 @@ use vulkano::pipeline::layout::PipelineDescriptorSetLayoutCreateInfo;
 use vulkano::pipeline::{Pipeline, PipelineBindPoint, PipelineLayout, PipelineShaderStageCreateInfo};
 use vulkano::render_pass::Subpass;
 use vulkano::Validated;
-
+use crate::client::DebugConfig;
 use crate::geometry::line::Line;
 use crate::render::camera::{Camera, VP};
 use crate::resource::map::blockmap::Blockmap;
@@ -668,80 +669,52 @@ mod shaders {
     pub mod vert {
         vulkano_shaders::shader! {
             ty: "vertex",
-            src: r"
-                #version 460
-
-                layout(location = 0) in vec3 position;
-                layout(location = 1) in vec2 uv;
-                layout(location = 2) in float light;
-                layout(location = 3) in uint tag;
-                layout(location = 4) in uint tex_id;
-
-                layout(location = 0) out vec2 tex_coords;
-                layout(location = 1) out float out_light;
-                layout(location = 2) flat out uint out_tex_id;
-
-                layout(set = 0, binding = 0) uniform VP_Data {
-                    mat4 vp;
-                } vp;
-
-                void main() {
-                    gl_Position = vp.vp * vec4(position, 1.0);
-                    tex_coords = uv;
-                    out_light = light;
-                    out_tex_id = tex_id;
-                }
-            ",
+            path: "assets/shaders/map.vert",
         }
     }
 
     pub mod frag {
         vulkano_shaders::shader! {
             ty: "fragment",
-            src: r"
-                #version 460
-                #extension GL_EXT_nonuniform_qualifier : require
+            path: "assets/shaders/map.frag",
+        }
+    }
 
-                layout(location = 0) in vec2 tex_coords;
-                layout(location = 1) in float light;
-                layout(location = 2) flat in uint tex_id;
-                layout(location = 0) out vec4 f_color;
-
-                layout(set = 1, binding = 0) uniform sampler s;
-                layout(set = 1, binding = 1) uniform texture2D tex[];
-
-                void main() {
-                    vec4 color = texture(sampler2D(tex[nonuniformEXT(tex_id)], s), tex_coords);
-                    f_color = vec4(color.xyz * light, color.w);
-                }
-            ",
+    pub mod frag_wireframe {
+        vulkano_shaders::shader! {
+            ty: "fragment",
+            path: "assets/shaders/map.frag",
+            define: [("WIREFRAME", "1")],
         }
     }
 }
 
-pub struct MapRenderer {
-    chunks: Arc<Blockmap<RENDER_CHUNK_SIZE, Chunk>>,
+struct MapRendererGraphicsPipeline {
     graphics: Arc<EngineGraphicsPipeline>,
     descriptor_set_0: EngineDescriptorSet,
     descriptor_set_1: EngineDescriptorSet,
-    vertex_buffer: Subbuffer<[MapVertex]>,
-    index_buffer: IndexBuffer,
 }
 
-impl MapRenderer {
-    pub fn new(
+impl MapRendererGraphicsPipeline {
+    fn new(
+        wireframe: bool,
         camera: Arc<Uniform<VP, Camera>>,
-        chunks: Arc<Blockmap<RENDER_CHUNK_SIZE, Chunk>>,
-        model_data: MapModelData,
+        textures: Arc<EngineResourceImages<Texture>>,
+        textures_count: u32,
         renderer: &Arc<Renderer>,
         subpass: &Subpass,
     ) -> Result<Self, VulkanoError> {
         let vert = shaders::vert::load(renderer.device().vk_device().clone())
             .expect("Failed to create vertex shader module")
             .entry_point("main").unwrap();
-        let frag = shaders::frag::load(renderer.device().vk_device().clone())
-            .expect("Failed to create fragment shader module")
-            .entry_point("main").unwrap();
+        let frag = match wireframe {
+            false => shaders::frag::load(renderer.device().vk_device().clone())
+                .expect("Failed to create fragment shader module")
+                .entry_point("main").unwrap(),
+            true => shaders::frag_wireframe::load(renderer.device().vk_device().clone())
+                .expect("Failed to create fragment shader module")
+                .entry_point("main").unwrap(),
+        };
 
         let vertex_input_state = Some(MapVertex::per_vertex()
             .definition(&vert.info().input_interface)
@@ -757,7 +730,7 @@ impl MapRenderer {
             // Set the ImageView count for the runtime descriptor array
             layout_create_info.set_layouts[1].bindings
                 .get_mut(&1).unwrap()
-                .descriptor_count = model_data.textures.len() as u32;
+                .descriptor_count = textures_count;
             PipelineLayout::new(
                 renderer.device().vk_device().clone(),
                 layout_create_info
@@ -816,19 +789,66 @@ impl MapRenderer {
         let descriptor_set_1 = EngineDescriptorSet::builder(renderer.clone())
             .layout(descriptor_layout_1.clone())
             .descriptor_source(0, sampler)
-            .descriptor_source(1, model_data.textures.into_descriptor_images())
+            .descriptor_source(1, textures)
             .build();
 
-        let vertex_buffer = model_data.vertices.into_vertex_buffer(renderer.device())?;
-        let index_buffer = model_data.vertex_indices.into_index_buffer(renderer.device())?;
-
         Ok(Self {
-            chunks,
             graphics,
             descriptor_set_0,
             descriptor_set_1,
+        })
+    }
+}
+
+pub struct MapRenderer {
+    debug_config: Arc<RwLock<DebugConfig>>,
+    chunks: Arc<Blockmap<RENDER_CHUNK_SIZE, Chunk>>,
+    vertex_buffer: Subbuffer<[MapVertex]>,
+    index_buffer: IndexBuffer,
+    graphics: MapRendererGraphicsPipeline,
+    // TODO: Not super efficient to create both immediately;
+    //  defer this so its only created when needed
+    graphics_wireframe: MapRendererGraphicsPipeline,
+}
+
+impl MapRenderer {
+    pub fn new(
+        debug_config: Arc<RwLock<DebugConfig>>,
+        camera: Arc<Uniform<VP, Camera>>,
+        chunks: Arc<Blockmap<RENDER_CHUNK_SIZE, Chunk>>,
+        model_data: MapModelData,
+        renderer: &Arc<Renderer>,
+        subpass: &Subpass,
+    ) -> Result<Self, VulkanoError> {
+        let vertex_buffer = model_data.vertices.into_vertex_buffer(renderer.device())?;
+        let index_buffer = model_data.vertex_indices.into_index_buffer(renderer.device())?;
+
+        let textures_count = model_data.textures.len() as u32;
+        let textures = model_data.textures.into_descriptor_images();
+        let graphics = MapRendererGraphicsPipeline::new(
+            false,
+            camera.clone(),
+            textures.clone(),
+            textures_count,
+            renderer,
+            subpass,
+        )?;
+        let graphics_wireframe = MapRendererGraphicsPipeline::new(
+            true,
+            camera,
+            textures,
+            textures_count,
+            renderer,
+            subpass,
+        )?;
+
+        Ok(Self {
+            debug_config,
+            chunks,
             vertex_buffer,
             index_buffer,
+            graphics,
+            graphics_wireframe,
         })
     }
 }
@@ -838,7 +858,11 @@ impl EngineRenderHandler for MapRenderer {
         &self,
         builder: &mut AutoCommandBufferBuilder<PrimaryAutoCommandBuffer>,
     ) -> Result<(), VulkanoError> {
-        let graphics = self.graphics.vk_graphics();
+        let pipeline = match self.debug_config.read().wireframe {
+            false => &self.graphics,
+            true => &self.graphics_wireframe,
+        };
+        let graphics = pipeline.graphics.vk_graphics();
 
         builder
             .bind_pipeline_graphics(graphics.clone()).unwrap()
@@ -846,13 +870,13 @@ impl EngineRenderHandler for MapRenderer {
                 PipelineBindPoint::Graphics,
                 graphics.layout().clone(),
                 0,
-                self.descriptor_set_0.descriptor_set().map_err(Validated::unwrap)?,
+                pipeline.descriptor_set_0.descriptor_set().map_err(Validated::unwrap)?,
             ).unwrap()
             .bind_descriptor_sets(
                 PipelineBindPoint::Graphics,
                 graphics.layout().clone(),
                 1,
-                self.descriptor_set_1.descriptor_set().map_err(Validated::unwrap)?,
+                pipeline.descriptor_set_1.descriptor_set().map_err(Validated::unwrap)?,
             ).unwrap()
             .bind_vertex_buffers(0, self.vertex_buffer.clone()).unwrap()
             .bind_index_buffer(self.index_buffer.clone()).unwrap();

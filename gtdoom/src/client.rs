@@ -16,12 +16,12 @@ use gtether::resource::source::fs::ResourceSourceFilesHandle;
 use gtether::util::tick_loop::{TickLoopBuilder, TickLoopHandle};
 use gtether::worker::WorkerPool;
 use gtether::Engine;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use parry3d::na::{Isometry3, Point3, Translation3};
 use smol::future;
 use std::sync::Arc;
 use tracing::{debug, info};
-use vulkano::device::Features;
+use vulkano::device::{DeviceExtensions, Features};
 use vulkano::format::Format;
 use vulkano::image::SampleCount;
 use vulkano::render_pass::{AttachmentDescription, AttachmentLoadOp, AttachmentStoreOp};
@@ -37,12 +37,63 @@ use crate::resource::map::Map;
 use crate::resource::patch::PatchViewLoader;
 use crate::WorkerPriority;
 
+#[derive(Debug)]
+pub struct DebugConfig {
+    pub wireframe: bool,
+}
+
+impl Default for DebugConfig {
+    fn default() -> Self {
+        Self {
+            wireframe: false,
+        }
+    }
+}
+
+#[derive(Educe)]
+#[educe(Debug)]
+struct DebugConfigWireframeCommand {
+    debug_config: Arc<RwLock<DebugConfig>>,
+}
+
+impl Command for DebugConfigWireframeCommand {
+    fn handle(&self, parameters: &[String]) -> Result<(), CommandError> {
+        ParamCountCheck::OneOf(vec![
+            ParamCountCheck::Equal(0),
+            ParamCountCheck::Equal(1),
+        ]).check(parameters.len() as u32)?;
+
+        match parameters.first().map(String::as_str) {
+            None | Some("toggle") => {
+                let mut debug_config = self.debug_config.write();
+                debug_config.wireframe = !debug_config.wireframe;
+                info!(wireframe = ?debug_config.wireframe, "Toggled DEBUG option");
+            },
+            Some("on") => {
+                let mut debug_config = self.debug_config.write();
+                debug_config.wireframe = true;
+                info!(wireframe = ?debug_config.wireframe, "Set DEBUG option");
+            },
+            Some("off") => {
+                let mut debug_config = self.debug_config.write();
+                debug_config.wireframe = false;
+                info!(wireframe = ?debug_config.wireframe, "Set DEBUG option");
+            },
+            Some(val) => return Err(CommandError::InvalidParameter(val.to_string())),
+        }
+
+        Ok(())
+    }
+}
+
 #[derive(Educe)]
 #[educe(Debug)]
 struct ChangeMapCommand {
     window: WindowHandle,
     #[educe(Debug(ignore))]
     resources: Arc<ResourceManager>,
+    #[educe(Debug(ignore))]
+    debug_config: Arc<RwLock<DebugConfig>>,
     #[educe(Debug(ignore))]
     console_gui: Arc<ConsoleGui>,
     #[educe(Debug(ignore))]
@@ -130,6 +181,7 @@ impl Command for ChangeMapCommand {
             lock.view_mut().set_target(glm::vec3(0.0, 0.0, 0.0));
         }
 
+        let debug_config = self.debug_config.clone();
         let render_pass = EngineRenderPassBuilder::new(self.window.renderer().clone())
             .attachment("depth", AttachmentDescription {
                 format: Format::D16_UNORM,
@@ -143,6 +195,7 @@ impl Command for ChangeMapCommand {
             .depth_stencil_attachment("depth")
             .color_attachment("color")
             .handler(move |renderer, subpass| MapRenderer::new(
+                debug_config,
                 renderer_camera,
                 chunks,
                 map_model_data,
@@ -199,10 +252,15 @@ impl Application for GtdoomClient {
         let window = engine.window_manager().create_window(CreateWindowInfo {
             attributes: WindowAttributes::default()
                 .with_title("GTDoom"),
+            device_extensions: DeviceExtensions {
+                khr_fragment_shader_barycentric: true,
+                ..Default::default()
+            },
             device_features: Features {
                 // These are used for texture array sizes determined at runtime
                 runtime_descriptor_array: true,
                 shader_sampled_image_array_non_uniform_indexing: true,
+                fragment_shader_barycentric: true,
                 ..Default::default()
             },
             ..Default::default()
@@ -320,13 +378,24 @@ impl Application for GtdoomClient {
             .spawn().unwrap()
         );
 
+        let debug_config = Arc::new(RwLock::new(DebugConfig::default()));
+
         let mut cmd_registry = self.console.registry();
         cmd_registry.register_command("changemap", Box::new(ChangeMapCommand {
             window,
             resources: engine.resources().clone(),
+            debug_config: debug_config.clone(),
             console_gui,
             camera,
         })).unwrap();
+
+        let mut debug_subcommands = CommandTree::default();
+        debug_subcommands.register_command(
+            "wireframe",
+            Box::new(DebugConfigWireframeCommand { debug_config: debug_config.clone() }),
+        ).unwrap();
+        cmd_registry
+            .register_command("debug", Box::new(debug_subcommands)).unwrap();
 
         let mut sources_subcommands = CommandTree::default();
         sources_subcommands.register_command(
