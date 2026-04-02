@@ -76,7 +76,7 @@ impl MapVertex {
         if (self.light - other.light).abs() >= 0.001 {
             return false
         }
-        self.tag == other.tag
+        self.tag == other.tag && self.tex_id == other.tex_id
     }
 }
 
