@@ -12,12 +12,12 @@ use i_triangle::float::triangulation::Triangulation;
 use i_triangle::float::triangulator::Triangulator;
 use i_triangle::i_overlay::core::solver::Solver;
 use i_triangle::int::validation::Validation;
+use parking_lot::RwLock;
 use smol::future::FutureExt;
 use std::fmt::{Debug, Formatter};
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::{Arc, LazyLock};
-use parking_lot::RwLock;
+use std::sync::Arc;
 use tracing::trace;
 use vulkano::buffer::{AllocateBufferError, Buffer, BufferContents, BufferCreateInfo, BufferUsage, IndexBuffer, Subbuffer};
 use vulkano::command_buffer::{AutoCommandBufferBuilder, PrimaryAutoCommandBuffer};
@@ -34,6 +34,7 @@ use vulkano::pipeline::layout::PipelineDescriptorSetLayoutCreateInfo;
 use vulkano::pipeline::{Pipeline, PipelineBindPoint, PipelineLayout, PipelineShaderStageCreateInfo};
 use vulkano::render_pass::Subpass;
 use vulkano::Validated;
+
 use crate::client::DebugConfig;
 use crate::geometry::line::Line;
 use crate::render::camera::{Camera, VP};
@@ -45,7 +46,7 @@ use crate::resource::map::vertex::{FixedFloat, FixedVertex};
 use crate::resource::texture::{Texture, TextureId};
 
 const MAP_VERTEX_EPSILON: f32 = 0.1;
-pub const RENDER_CHUNK_SIZE: u32 = 1024 * 16;
+pub const RENDER_CHUNK_SIZE: u32 = 256;
 pub type MapVertexIndex = u32;
 pub type MapTextureIndex = u16;
 
